@@ -12,7 +12,8 @@ function Read-Ini {
     $d = @{ WindowWidth=1200; WindowHeight=720; WindowState="Normal"; WindowLeft=-1; WindowTop=-1
         LeftPanelWidth=280; PreviewListHeight=300; ThumbSize=64; LastFolder=""; ZoomMode="BestFit"
         ViewMode="Thumbnails"; LeftPanelVisible=1; DetailColName=200; DetailColSize=80; DetailColDate=140
-        SortColumn="Name"; SortDirection="Ascending" }
+        SortColumn="Name"; SortDirection="Ascending"
+        ManualWidth=1200; ManualHeight=720 }
     if (-not [System.IO.File]::Exists($script:iniPath)) {
         try { if (-not [System.IO.Directory]::Exists($script:iniDir)){[System.IO.Directory]::CreateDirectory($script:iniDir)|Out-Null}; Write-Ini $d } catch {}
         return $d
@@ -42,11 +43,15 @@ function Write-Ini([hashtable]$cfg) {
 function Save-CurrentConfig {
     if($window.WindowState -eq [System.Windows.WindowState]::Normal){
         $script:config.WindowWidth=[int]$window.ActualWidth; $script:config.WindowHeight=[int]$window.ActualHeight
-        $script:config.WindowLeft=[int]$window.Left; $script:config.WindowTop=[int]$window.Top; $script:config.WindowState="Normal"
+        $script:config.WindowLeft=[int]$window.Left; $script:config.WindowTop=[int]$window.Top
+        $script:config.WindowState="Normal"
     } elseif($window.WindowState -eq [System.Windows.WindowState]::Maximized){
-        $script:config.WindowState="Maximized"; $rb=$window.RestoreBounds
-        if($rb.Width -gt 0){$script:config.WindowWidth=[int]$rb.Width; $script:config.WindowHeight=[int]$rb.Height; $script:config.WindowLeft=[int]$rb.Left; $script:config.WindowTop=[int]$rb.Top}
+        $script:config.WindowState="Maximized"
+        # Keep the manual size for restore; don't overwrite with maximize dimensions
     }
+    # Always persist the manual size
+    $script:config.ManualWidth=$script:manualWidth
+    $script:config.ManualHeight=$script:manualHeight
     $script:config.LeftPanelWidth=$script:savedPanelWidth
     $script:config.PreviewListHeight=[int]$PreviewListBorder.Height
     $script:config.ThumbSize=$script:thumbSize; $script:config.ZoomMode=$script:zoomMode; $script:config.ViewMode=$script:viewMode
@@ -58,6 +63,10 @@ function Save-CurrentConfig {
 }
 
 $script:config = Read-Ini
+
+# Track manual (user-dragged) window size separately
+$script:manualWidth = $script:config.ManualWidth
+$script:manualHeight = $script:config.ManualHeight
 
 $xamlString = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -95,7 +104,7 @@ $xamlString = @"
           <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Left" Margin="28,0,0,0"><Button x:Name="DeleteBtn" Style="{StaticResource ToolBtn}" ToolTip="Delete (Del)"><Canvas Width="20" Height="22"><Rectangle Width="14" Height="2" Fill="#FFDD6666" Canvas.Left="3" Canvas.Top="2" RadiusX="1" RadiusY="1"/><Rectangle Width="6" Height="1.5" Fill="#FFDD6666" Canvas.Left="7" Canvas.Top="0.5" RadiusX="1" RadiusY="1"/><Rectangle Width="12" Height="13" Canvas.Left="4" Canvas.Top="5" RadiusX="1.5" RadiusY="1.5" Fill="Transparent" Stroke="#FFDD6666" StrokeThickness="1.5"/><Line X1="8" Y1="7.5" X2="8" Y2="16" Stroke="#FFDD6666" StrokeThickness="1.2"/><Line X1="12" Y1="7.5" X2="12" Y2="16" Stroke="#FFDD6666" StrokeThickness="1.2"/></Canvas></Button></StackPanel>
         </Grid>
       </Grid>
-      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition x:Name="LeftPanelColumn" Width="280" MinWidth="0"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition x:Name="LeftPanelColumn" Width="280" MinWidth="140"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*" MinWidth="100"/></Grid.ColumnDefinitions>
         <Border Grid.Column="0" Background="#FF10151C" Width="28"><Button x:Name="HamburgerBtn" VerticalAlignment="Top" Margin="2,8,2,0" Cursor="Hand" ToolTip="Toggle panel" Width="24" Height="24"><Button.Template><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="3" Background="Transparent" BorderThickness="1" BorderBrush="Transparent" Padding="3"><Canvas Width="16" Height="14"><Rectangle Width="16" Height="2" Fill="#FFAABBCC" Canvas.Top="1"/><Rectangle Width="16" Height="2" Fill="#FFAABBCC" Canvas.Top="6"/><Rectangle Width="16" Height="2" Fill="#FFAABBCC" Canvas.Top="11"/></Canvas></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1E2E44"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF3A5A78"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template></Button></Border>
         <DockPanel x:Name="LeftPanel" Grid.Column="1" Background="#FF10151C">
           <Border DockPanel.Dock="Top" Padding="6,6,6,4"><Button x:Name="OpenFolderBtn" Height="28" Cursor="Hand" ToolTip="Open a folder"><Button.Template><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="4" BorderThickness="1" BorderBrush="#FF4A6A90" Background="#FF1E2E44" Padding="10,4"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Canvas Width="16" Height="14" Margin="0,1,6,0"><Path Fill="#FFCCAA44" Data="M 0,3 L 2,0 L 8,0 L 10,3 L 16,3 L 16,14 L 0,14 Z"/><Path Fill="#FFDDBB55" Data="M 0,5 L 3,5 L 5,12 L 16,12 L 16,5 L 13,5 Z"/></Canvas><TextBlock Text="Open Folder" Foreground="#FFAABBCC" FontSize="11" VerticalAlignment="Center"/></StackPanel></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF2A3E58"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF6A9AC0"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1A3050"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template></Button></Border>
@@ -121,9 +130,16 @@ $xamlString = @"
 
 try{$reader=[System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xamlString));$window=[System.Windows.Markup.XamlReader]::Load($reader)}catch{Write-Host "XAML FAILED: $($_.Exception.Message)" -ForegroundColor Red;exit}
 
-$window.Width=$script:config.WindowWidth;$window.Height=$script:config.WindowHeight
-if($script:config.WindowLeft -ge 0 -and $script:config.WindowTop -ge 0){$window.WindowStartupLocation=[System.Windows.WindowStartupLocation]::Manual;$window.Left=$script:config.WindowLeft;$window.Top=$script:config.WindowTop}
-if($script:config.WindowState -eq "Maximized"){$window.WindowState=[System.Windows.WindowState]::Maximized}
+# Apply saved window size - use ManualWidth/Height as the Normal size
+$window.Width=$script:config.ManualWidth; $window.Height=$script:config.ManualHeight
+if($script:config.WindowLeft -ge 0 -and $script:config.WindowTop -ge 0){
+    $window.WindowStartupLocation=[System.Windows.WindowStartupLocation]::Manual
+    $window.Left=$script:config.WindowLeft; $window.Top=$script:config.WindowTop
+}
+# Launch maximized if it was saved that way
+if($script:config.WindowState -eq "Maximized"){
+    $window.WindowState=[System.Windows.WindowState]::Maximized
+}
 
 # Element refs
 $MainImage=$window.FindName("MainImage");$FSImage=$window.FindName("FSImage");$Overlay=$window.FindName("FullScreenOverlay");$Viewer=$window.FindName("Viewer");$ImageScale=$window.FindName("ImageScale")
@@ -141,9 +157,10 @@ $DetailHeaderRow=$window.FindName("DetailHeaderRow");$SortNameBtn=$window.FindNa
 $SortNameText=$window.FindName("SortNameText");$SortSizeText=$window.FindName("SortSizeText");$SortDateText=$window.FindName("SortDateText")
 $DetailColNameDef=$window.FindName("DetailColNameDef");$DetailColSizeDef=$window.FindName("DetailColSizeDef");$DetailColDateDef=$window.FindName("DetailColDateDef")
 
-# Apply INI
-$LeftPanelColumn.Width=[System.Windows.GridLength]::new($script:config.LeftPanelWidth,[System.Windows.GridUnitType]::Pixel)
-$PreviewListBorder.Height=$script:config.PreviewListHeight
+# Apply INI - enforce minimum panel width
+$panelW = [Math]::Max($script:config.LeftPanelWidth, 140)
+$LeftPanelColumn.Width=[System.Windows.GridLength]::new($panelW,[System.Windows.GridUnitType]::Pixel)
+$PreviewListBorder.Height=[Math]::Max($script:config.PreviewListHeight, 60)
 $DetailColNameDef.Width=[System.Windows.GridLength]::new($script:config.DetailColName,[System.Windows.GridUnitType]::Pixel)
 $DetailColSizeDef.Width=[System.Windows.GridLength]::new($script:config.DetailColSize,[System.Windows.GridUnitType]::Pixel)
 $DetailColDateDef.Width=[System.Windows.GridLength]::new($script:config.DetailColDate,[System.Windows.GridUnitType]::Pixel)
@@ -157,14 +174,26 @@ $script:thumbSize=$script:config.ThumbSize;$script:thumbSizes=@(32,48,64,80,96,1
 $script:zoomMode=$script:config.ZoomMode;$script:viewMode=$script:config.ViewMode
 $script:splitDragging=$false;$script:splitDragStartY=0;$script:splitDragStartH=0
 $script:panelVisible=$script:config.LeftPanelVisible -ne 0
-$script:savedPanelWidth=[int]$script:config.LeftPanelWidth
+$script:savedPanelWidth=[Math]::Max([int]$script:config.LeftPanelWidth, 140)
 $script:sortColumn=$script:config.SortColumn;$script:sortDirection=$script:config.SortDirection
 $script:maxPreviewLoad=200
+# Track whether we're in slideshow-triggered fullscreen (to know whether to restore to maximized or normal)
+$script:wasMaximizedBeforeFS = $false
+$script:oldWindowState = 'Normal'
 $ThumbSizeLabel.Text="$($script:thumbSize)"
 
 function Apply-PanelVisibility{
-    if($script:panelVisible){$LeftPanel.Visibility='Visible';$MainSplitter.Visibility='Visible';$LeftPanelColumn.MinWidth=140;$LeftPanelColumn.Width=[System.Windows.GridLength]::new([Math]::Max($script:savedPanelWidth,140),[System.Windows.GridUnitType]::Pixel)}
-    else{if($LeftPanelColumn.Width.Value -gt 10){$script:savedPanelWidth=[int]$LeftPanelColumn.Width.Value};$LeftPanel.Visibility='Collapsed';$MainSplitter.Visibility='Collapsed';$LeftPanelColumn.MinWidth=0;$LeftPanelColumn.Width=[System.Windows.GridLength]::new(0,[System.Windows.GridUnitType]::Pixel)}
+    if($script:panelVisible){
+        $LeftPanel.Visibility='Visible';$MainSplitter.Visibility='Visible'
+        $LeftPanelColumn.MinWidth=140
+        $w = [Math]::Max($script:savedPanelWidth, 140)
+        $LeftPanelColumn.Width=[System.Windows.GridLength]::new($w,[System.Windows.GridUnitType]::Pixel)
+    } else {
+        if($LeftPanelColumn.Width.Value -gt 10){$script:savedPanelWidth=[Math]::Max([int]$LeftPanelColumn.Width.Value, 140)}
+        $LeftPanel.Visibility='Collapsed';$MainSplitter.Visibility='Collapsed'
+        $LeftPanelColumn.MinWidth=0
+        $LeftPanelColumn.Width=[System.Windows.GridLength]::new(0,[System.Windows.GridUnitType]::Pixel)
+    }
     Save-CurrentConfig
 }
 Apply-PanelVisibility
@@ -177,23 +206,57 @@ Update-SortIndicators
 $script:fsIdleTimer=New-Object System.Windows.Threading.DispatcherTimer;$script:fsIdleTimer.Interval=[TimeSpan]::FromSeconds(5)
 $script:fsIdleTimer.Add_Tick({if($Overlay.Visibility -eq 'Visible'){$window.Cursor=[System.Windows.Input.Cursors]::None;$FSBottomBar.Visibility='Collapsed';$FSCountLabelBorder.Visibility='Collapsed';$script:fsIdleTimer.Stop()}})
 $Overlay.Add_MouseMove({param($s,$e);if($Overlay.Visibility -ne 'Visible'){return};$p=$e.GetPosition($Overlay);if($null -eq $script:lastMousePos){$script:lastMousePos=$p;return};if([Math]::Abs($p.X-$script:lastMousePos.X) -gt 2 -or [Math]::Abs($p.Y-$script:lastMousePos.Y) -gt 2){$script:lastMousePos=$p;if($window.Cursor -eq [System.Windows.Input.Cursors]::None){$window.Cursor=[System.Windows.Input.Cursors]::Arrow;$FSBottomBar.Visibility='Visible';$FSCountLabelBorder.Visibility='Visible'};$script:fsIdleTimer.Stop();$script:fsIdleTimer.Start()}})
-$window.Add_StateChanged({if($window.WindowState -eq 'Minimized'){[System.GC]::Collect();[System.GC]::WaitForPendingFinalizers();[System.GC]::Collect()}})
 
-# Deferred GC timer - runs once after idle
+# Track manual resize: when user drags window edges in Normal state, save that size
+$script:windowLoaded = $false
+$window.Add_Loaded({ $script:windowLoaded = $true })
+
+$window.Add_StateChanged({
+    if($window.WindowState -eq 'Minimized'){
+        [System.GC]::Collect();[System.GC]::WaitForPendingFinalizers();[System.GC]::Collect()
+    }
+    # When restoring from Maximized to Normal (not during fullscreen), use manual size and recenter
+    if($script:windowLoaded -and $Overlay.Visibility -ne 'Visible'){
+        if($window.WindowState -eq [System.Windows.WindowState]::Normal){
+            # Apply the remembered manual size
+            $window.Width = $script:manualWidth
+            $window.Height = $script:manualHeight
+            # Center on the screen the window is on
+            $screen = [System.Windows.Forms.Screen]::FromPoint(
+                [System.Drawing.Point]::new([int]($window.Left + $window.Width/2), [int]($window.Top + $window.Height/2))
+            )
+            $wa = $screen.WorkingArea
+            $newLeft = $wa.Left + ($wa.Width - $script:manualWidth) / 2
+            $newTop = $wa.Top + ($wa.Height - $script:manualHeight) / 2
+            $window.Left = [Math]::Max($wa.Left, $newLeft)
+            $window.Top = [Math]::Max($wa.Top, $newTop)
+        }
+        Save-CurrentConfig
+    }
+})
+
+# Deferred GC timer
 $script:gcTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:gcTimer.Interval = [TimeSpan]::FromSeconds(3)
 $script:gcTimer.Add_Tick({ $script:gcTimer.Stop(); [System.GC]::Collect(1, [System.GCCollectionMode]::Optimized) })
 function Request-GC { $script:gcTimer.Stop(); $script:gcTimer.Start() }
 
-# Split handle
+# Split handle for preview/folder vertical split
 $PanelSplitHandle.Add_MouseLeftButtonDown({param($s,$e);$script:splitDragging=$true;$script:splitDragStartY=($e.GetPosition($window)).Y;$script:splitDragStartH=$PreviewListBorder.Height;$PanelSplitHandle.CaptureMouse()|Out-Null;$e.Handled=$true})
 $PanelSplitHandle.Add_MouseMove({param($s,$e);if(-not $script:splitDragging){return};$newH=$script:splitDragStartH+($script:splitDragStartY-($e.GetPosition($window)).Y);if($newH -lt 60){$newH=60};if($newH -gt 800){$newH=800};$PreviewListBorder.Height=$newH;$e.Handled=$true})
 $PanelSplitHandle.Add_MouseLeftButtonUp({param($s,$e);if($script:splitDragging){$script:splitDragging=$false;$PanelSplitHandle.ReleaseMouseCapture();Save-CurrentConfig;$e.Handled=$true}})
 
-# Track panel width from splitter drag
-$MainSplitter.Add_DragCompleted({if($script:panelVisible -and $LeftPanelColumn.Width.Value -gt 10){$script:savedPanelWidth=[int]$LeftPanelColumn.Width.Value;Save-CurrentConfig}})
+# Track panel width from splitter drag - enforce minimum
+$MainSplitter.Add_DragCompleted({
+    if($script:panelVisible){
+        $v = $LeftPanelColumn.Width.Value
+        if($v -lt 140){ $v = 140; $LeftPanelColumn.Width=[System.Windows.GridLength]::new(140,[System.Windows.GridUnitType]::Pixel) }
+        $script:savedPanelWidth=[int]$v
+        Save-CurrentConfig
+    }
+})
 
-# Preview scroll - 8px per tick for very gentle scrolling
+# Preview scroll
 $PreviewListBorder.Add_PreviewMouseWheel({param($s,$e)
     $lb=$ImagePreviewList;if($null -eq $lb){return}
     try{$dec=[System.Windows.Media.VisualTreeHelper]::GetChild($lb,0);if($null -ne $dec){$sv=[System.Windows.Media.VisualTreeHelper]::GetChild($dec,0);if($null -ne $sv -and $sv -is [System.Windows.Controls.ScrollViewer]){if($e.Delta -gt 0){$sv.ScrollToVerticalOffset($sv.VerticalOffset-8)}else{$sv.ScrollToVerticalOffset($sv.VerticalOffset+8)};$e.Handled=$true}}}catch{}
@@ -331,15 +394,55 @@ $ZoomInBtn.Add_Click({if($null -eq $MainImage.Source){return};$c=$script:current
 $ZoomOutBtn.Add_Click({if($null -eq $MainImage.Source){return};$c=$script:currentZoom;$p=$script:zoomLevels|Where-Object{$_ -lt ($c-0.005)}|Select-Object -Last 1;if($null -eq $p){$p=$script:zoomLevels[0]};Apply-Zoom $p})
 $FitBtn.Add_Click({if($null -ne $MainImage.Source){$script:zoomMode="BestFit";Fit-ToWindow;Save-CurrentConfig}})
 $DeleteBtn.Add_Click({if($script:images.Count -eq 0){return};$path=$script:images[$script:currentIndex];$name=[System.IO.Path]::GetFileName($path);$r=[System.Windows.MessageBox]::Show("Move '$name' to the Recycle Bin?","Windows Photo Viewer",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Question);if($r -eq 'Yes'){try{[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($path,'OnlyErrorDialogs','SendToRecycleBin');$script:imageCache.Remove($path);$script:images.RemoveAt($script:currentIndex);$script:allFolderFiles=@($script:allFolderFiles|Where-Object{$_ -ne $path});if($ImagePreviewList.Items.Count -gt $script:currentIndex){$script:updatingSelection=$true;$ImagePreviewList.Items.RemoveAt($script:currentIndex);$script:updatingSelection=$false};if($script:currentIndex -ge $script:images.Count){$script:currentIndex=0};$PreviewHeader.Text="IMAGES ($($script:images.Count))";Update-Image}catch{[System.Windows.MessageBox]::Show("Could not delete.`n$_","Error",'OK','Error')}}})
-function Enter-Fullscreen{if($script:images.Count -eq 0){return};$script:oldResizeMode=$window.ResizeMode;$Overlay.Visibility='Visible';$Overlay.Focus()|Out-Null;$window.WindowStyle='None';$window.ResizeMode='NoResize';$window.WindowState='Maximized';$script:slideshowRunning=$true;$script:lastMousePos=$null;$script:fsIdleTimer.Stop();$script:fsIdleTimer.Start();if($null -eq $script:slideshowTimer){$script:slideshowTimer=New-Object System.Windows.Threading.DispatcherTimer;$script:slideshowTimer.Interval=[TimeSpan]::FromSeconds(5);$script:slideshowTimer.Add_Tick({if($script:slideshowRunning){Step-Next}})};$script:slideshowTimer.Start()}
-function Exit-Fullscreen{$Overlay.Visibility='Collapsed';$window.WindowStyle='SingleBorderWindow';$window.ResizeMode=$script:oldResizeMode;$window.WindowState='Normal';$window.Cursor=[System.Windows.Input.Cursors]::Arrow;$script:fsIdleTimer.Stop();$FSBottomBar.Visibility='Visible';$FSCountLabelBorder.Visibility='Visible';if($null -ne $script:slideshowTimer){$script:slideshowTimer.Stop()};$script:slideshowRunning=$false}
+
+function Enter-Fullscreen{
+    if($script:images.Count -eq 0){return}
+    # Remember state before fullscreen
+    $script:wasMaximizedBeforeFS = ($window.WindowState -eq [System.Windows.WindowState]::Maximized)
+    $script:oldResizeMode=$window.ResizeMode
+    $Overlay.Visibility='Visible';$Overlay.Focus()|Out-Null
+    $window.WindowStyle='None';$window.ResizeMode='NoResize';$window.WindowState='Maximized'
+    $script:slideshowRunning=$true;$script:lastMousePos=$null;$script:fsIdleTimer.Stop();$script:fsIdleTimer.Start()
+    if($null -eq $script:slideshowTimer){$script:slideshowTimer=New-Object System.Windows.Threading.DispatcherTimer;$script:slideshowTimer.Interval=[TimeSpan]::FromSeconds(5);$script:slideshowTimer.Add_Tick({if($script:slideshowRunning){Step-Next}})}
+    $script:slideshowTimer.Start()
+}
+
+function Exit-Fullscreen{
+    $Overlay.Visibility='Collapsed'
+    $window.WindowStyle='SingleBorderWindow';$window.ResizeMode=$script:oldResizeMode
+    $window.Cursor=[System.Windows.Input.Cursors]::Arrow;$script:fsIdleTimer.Stop()
+    $FSBottomBar.Visibility='Visible';$FSCountLabelBorder.Visibility='Visible'
+    if($null -ne $script:slideshowTimer){$script:slideshowTimer.Stop()};$script:slideshowRunning=$false
+    # Restore to previous state
+    if($script:wasMaximizedBeforeFS){
+        $window.WindowState=[System.Windows.WindowState]::Maximized
+    } else {
+        $window.WindowState=[System.Windows.WindowState]::Normal
+        # The StateChanged handler will apply manual size and recenter
+    }
+}
+
 $FSBtn.Add_Click({Enter-Fullscreen});$FSExitBtn.Add_Click({Exit-Fullscreen})
 $FSPauseBtn.Add_Click({$script:slideshowRunning=-not $script:slideshowRunning;if($script:slideshowRunning){$script:slideshowTimer.Start()}else{$script:slideshowTimer.Stop()}})
 $Viewer.Add_PreviewMouseWheel({param($s,$e);if($null -eq $MainImage.Source){return};Apply-Zoom($script:currentZoom*($(if($e.Delta -gt 0){1.15}else{1/1.15})));$e.Handled=$true})
 $Viewer.Add_PreviewMouseLeftButtonDown({param($s,$e);if($null -eq $MainImage.Source){return};if($e.ClickCount -eq 2){if($Overlay.Visibility -eq 'Visible'){Exit-Fullscreen}else{Enter-Fullscreen};return};$script:isDragging=$true;$script:dragStartPos=$e.GetPosition($Viewer);$script:dragStartHOffset=$Viewer.HorizontalOffset;$script:dragStartVOffset=$Viewer.VerticalOffset;$Viewer.Cursor=[System.Windows.Input.Cursors]::ScrollAll;$Viewer.CaptureMouse()|Out-Null;$e.Handled=$true})
 $Viewer.Add_PreviewMouseMove({param($s,$e);if(-not $script:isDragging){return};$p=$e.GetPosition($Viewer);$Viewer.ScrollToHorizontalOffset($script:dragStartHOffset+($script:dragStartPos.X-$p.X));$Viewer.ScrollToVerticalOffset($script:dragStartVOffset+($script:dragStartPos.Y-$p.Y))})
 $Viewer.Add_PreviewMouseLeftButtonUp({param($s,$e);if($script:isDragging){$script:isDragging=$false;$Viewer.ReleaseMouseCapture();$Viewer.Cursor=[System.Windows.Input.Cursors]::Arrow}})
-$window.Add_SizeChanged({if($null -ne $MainImage.Source -and $script:zoomMode -eq "BestFit" -and [Math]::Abs($script:currentZoom-$script:fitZoom) -lt 0.002){$script:fitZoom=Get-FitZoom;Apply-Zoom $script:fitZoom}})
+
+# Track manual resize: only when Normal state and not during fullscreen overlay
+$window.Add_SizeChanged({
+    if($null -ne $MainImage.Source -and $script:zoomMode -eq "BestFit" -and [Math]::Abs($script:currentZoom-$script:fitZoom) -lt 0.002){
+        $script:fitZoom=Get-FitZoom;Apply-Zoom $script:fitZoom
+    }
+    # Track manual resize when user drags edges in Normal state
+    if($script:windowLoaded -and $window.WindowState -eq [System.Windows.WindowState]::Normal -and $Overlay.Visibility -ne 'Visible'){
+        $w = [int]$window.ActualWidth; $h = [int]$window.ActualHeight
+        if($w -ge 400 -and $h -ge 300){
+            $script:manualWidth = $w; $script:manualHeight = $h
+        }
+    }
+})
+
 $window.Add_KeyDown({param($s,$e);if($Overlay.Visibility -eq 'Visible'){$window.Cursor=[System.Windows.Input.Cursors]::Arrow;$FSBottomBar.Visibility='Visible';$FSCountLabelBorder.Visibility='Visible';$script:fsIdleTimer.Stop();$script:fsIdleTimer.Start()};switch($e.Key){'Escape'{if($Overlay.Visibility -eq 'Visible'){Exit-Fullscreen}}'Right'{Step-Next;$e.Handled=$true}'Left'{Step-Prev;$e.Handled=$true}'F11'{if($Overlay.Visibility -eq 'Visible'){Exit-Fullscreen}else{Enter-Fullscreen}}'Delete'{$DeleteBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))}'F'{if($null -ne $MainImage.Source){$script:zoomMode="BestFit";Fit-ToWindow}}'Add'{if($null -ne $MainImage.Source){$ZoomInBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))}}'Subtract'{if($null -ne $MainImage.Source){$ZoomOutBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))}}};if($e.Key -eq 'O' -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)){Open-Images;$e.Handled=$true}})
 $window.AllowDrop=$true;$window.Add_DragOver({param($s,$e);$e.Effects=[System.Windows.DragDropEffects]::Copy;$e.Handled=$true})
 $window.Add_Drop({param($s,$e);if(-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)){return};$files=$e.Data.GetData([System.Windows.DataFormats]::FileDrop);if($files.Count -eq 1 -and [System.IO.Directory]::Exists($files[0])){Load-Folder $files[0];return};$script:images.Clear();$script:imageCache.Clear();foreach($f in $files){if($script:supportedExts -contains [System.IO.Path]::GetExtension($f).ToLower()){$script:images.Add($f)}};if($script:images.Count -gt 0){$sorted=$script:images|Sort-Object -Unique;$script:images.Clear();foreach($f in $sorted){$script:images.Add($f)};$script:currentIndex=0;$dir=[System.IO.Path]::GetDirectoryName($script:images[0]);$script:config.LastFolder=$dir;Build-FolderTree $dir;Populate-ImagePreviews $dir;for($i=0;$i -lt $script:images.Count;$i++){if($script:images[$i] -eq $sorted[0]){$script:currentIndex=$i;break}};Update-Image}})
