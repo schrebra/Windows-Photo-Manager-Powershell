@@ -1,0 +1,533 @@
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -AssemblyName System.Windows.Forms
+
+$script:supportedExts = @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.tif', '.ico')
+
+# INI in AppData\Local
+$script:iniDir = [System.IO.Path]::Combine([Environment]::GetFolderPath('LocalApplicationData'), "PSPhotoViewer")
+$script:iniPath = [System.IO.Path]::Combine($script:iniDir, "PhotoViewer.ini")
+
+function Read-Ini {
+    $defaults = @{
+        WindowWidth=1200; WindowHeight=720; WindowState="Normal"; WindowLeft=-1; WindowTop=-1
+        LeftPanelWidth=280; PreviewListHeight=300; ThumbSize=64; LastFolder=""; ZoomMode="BestFit"
+        ViewMode="Thumbnails"; LeftPanelVisible=1
+        DetailColName=200; DetailColSize=80; DetailColDate=140
+        SortColumn="Name"; SortDirection="Ascending"
+    }
+    if (-not [System.IO.File]::Exists($script:iniPath)) {
+        # First launch: create ini dir and file with defaults
+        try {
+            if (-not [System.IO.Directory]::Exists($script:iniDir)) { [System.IO.Directory]::CreateDirectory($script:iniDir) | Out-Null }
+            Write-Ini $defaults
+        } catch {}
+        return $defaults
+    }
+    try {
+        foreach ($line in [System.IO.File]::ReadAllLines($script:iniPath)) {
+            $line = $line.Trim()
+            if ($line.StartsWith('#') -or $line.StartsWith(';') -or -not $line.Contains('=')) { continue }
+            $parts = $line.Split('=', 2); $key = $parts[0].Trim(); $val = $parts[1].Trim()
+            if ($defaults.ContainsKey($key)) {
+                if ($key -match 'Folder|ZoomMode|WindowState|ViewMode|SortColumn|SortDirection') { $defaults[$key] = $val }
+                else { $p = 0; if ([int]::TryParse($val, [ref]$p)) { $defaults[$key] = $p } }
+            }
+        }
+    } catch {}
+    return $defaults
+}
+
+function Write-Ini([hashtable]$cfg) {
+    try {
+        if (-not [System.IO.Directory]::Exists($script:iniDir)) { [System.IO.Directory]::CreateDirectory($script:iniDir) | Out-Null }
+        $lines = @("# PSPhotoViewer Configuration", "# Settings are saved automatically on exit", "")
+        foreach ($k in $cfg.Keys | Sort-Object) { $lines += "$k=$($cfg[$k])" }
+        [System.IO.File]::WriteAllLines($script:iniPath, $lines)
+    } catch {}
+}
+
+$script:config = Read-Ini
+
+$xamlString = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Windows Photo Viewer" Height="720" Width="1200"
+        WindowStartupLocation="CenterScreen" Background="#FF141820" FontFamily="Segoe UI" FontSize="12">
+  <Window.Resources>
+    <LinearGradientBrush x:Key="PillNormal" StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF3A5070" Offset="0"/><GradientStop Color="#FF243A58" Offset="0.49"/><GradientStop Color="#FF182E48" Offset="0.51"/><GradientStop Color="#FF1E3850" Offset="1"/></LinearGradientBrush>
+    <LinearGradientBrush x:Key="PillHover" StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF4E6E94" Offset="0"/><GradientStop Color="#FF335878" Offset="0.49"/><GradientStop Color="#FF244268" Offset="0.51"/><GradientStop Color="#FF2E5278" Offset="1"/></LinearGradientBrush>
+    <LinearGradientBrush x:Key="PillPressed" StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF1A3050" Offset="0"/><GradientStop Color="#FF243C5C" Offset="1"/></LinearGradientBrush>
+
+    <Style x:Key="DarkScrollBarThumb" TargetType="Thumb"><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb"><Border CornerRadius="3" Background="#FF3A4A5A" Margin="1"/></ControlTemplate></Setter.Value></Setter></Style>
+    <Style x:Key="DarkScrollBarPageButton" TargetType="RepeatButton"><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate></Setter.Value></Setter></Style>
+    <Style x:Key="DarkVerticalScrollBar" TargetType="ScrollBar">
+      <Setter Property="Width" Value="8"/><Setter Property="MinWidth" Value="8"/><Setter Property="Background" Value="#FF1A1E28"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar"><Grid><Border Background="#FF1A1E28" CornerRadius="3"/><Track x:Name="PART_Track" IsDirectionReversed="True"><Track.DecreaseRepeatButton><RepeatButton Style="{StaticResource DarkScrollBarPageButton}" Command="ScrollBar.PageUpCommand"/></Track.DecreaseRepeatButton><Track.Thumb><Thumb Style="{StaticResource DarkScrollBarThumb}"/></Track.Thumb><Track.IncreaseRepeatButton><RepeatButton Style="{StaticResource DarkScrollBarPageButton}" Command="ScrollBar.PageDownCommand"/></Track.IncreaseRepeatButton></Track></Grid></ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="DarkHorizontalScrollBar" TargetType="ScrollBar">
+      <Setter Property="Height" Value="8"/><Setter Property="MinHeight" Value="8"/><Setter Property="Background" Value="#FF1A1E28"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar"><Grid><Border Background="#FF1A1E28" CornerRadius="3"/><Track x:Name="PART_Track" IsDirectionReversed="False"><Track.DecreaseRepeatButton><RepeatButton Style="{StaticResource DarkScrollBarPageButton}" Command="ScrollBar.PageLeftCommand"/></Track.DecreaseRepeatButton><Track.Thumb><Thumb Style="{StaticResource DarkScrollBarThumb}"/></Track.Thumb><Track.IncreaseRepeatButton><RepeatButton Style="{StaticResource DarkScrollBarPageButton}" Command="ScrollBar.PageRightCommand"/></Track.IncreaseRepeatButton></Track></Grid></ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="DarkScrollViewer" TargetType="ScrollViewer">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollViewer"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <ScrollContentPresenter Grid.Column="0" Grid.Row="0"/>
+      <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Grid.Row="0" Style="{StaticResource DarkVerticalScrollBar}" Orientation="Vertical" Value="{TemplateBinding VerticalOffset}" Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}" Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
+      <ScrollBar x:Name="PART_HorizontalScrollBar" Grid.Column="0" Grid.Row="1" Style="{StaticResource DarkHorizontalScrollBar}" Orientation="Horizontal" Value="{TemplateBinding HorizontalOffset}" Maximum="{TemplateBinding ScrollableWidth}" ViewportSize="{TemplateBinding ViewportWidth}" Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}"/>
+      </Grid></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="NavPillBtn" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Height" Value="34"/><Setter Property="Width" Value="48"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Grid><Border x:Name="bd" CornerRadius="5" BorderThickness="1" BorderBrush="#FF4A6A90" Background="{StaticResource PillNormal}"/><Border Height="16" VerticalAlignment="Top" Margin="1,1,1,0" CornerRadius="4,4,1,1" IsHitTestVisible="False"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#44FFFFFF" Offset="0"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></Border.Background></Border><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="{StaticResource PillHover}"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF6A9AC0"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="{StaticResource PillPressed}"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.35"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="OrbBtn" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Width" Value="52"/><Setter Property="Height" Value="52"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Grid Width="52" Height="52"><Ellipse Margin="-6"><Ellipse.Fill><SolidColorBrush Color="#5000AAFF"/></Ellipse.Fill><Ellipse.Effect><BlurEffect Radius="10"/></Ellipse.Effect></Ellipse><Ellipse Fill="#AA000000" Margin="2,4,2,-2"><Ellipse.Effect><BlurEffect Radius="5"/></Ellipse.Effect></Ellipse><Ellipse><Ellipse.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF8899AA" Offset="0"/><GradientStop Color="#FF3A4A5A" Offset="1"/></LinearGradientBrush></Ellipse.Fill></Ellipse><Ellipse Margin="3" Fill="#FF05101A"/><Ellipse x:Name="orbBody" Margin="4"><Ellipse.Fill><RadialGradientBrush GradientOrigin="0.5,1.05" Center="0.5,1.05" RadiusX="0.85" RadiusY="0.9"><GradientStop Color="#FF60B8FF" Offset="0"/><GradientStop Color="#FF1870D0" Offset="0.5"/><GradientStop Color="#FF083880" Offset="1"/></RadialGradientBrush></Ellipse.Fill></Ellipse><Path Margin="5,4,5,0" Stretch="Fill" Height="24" VerticalAlignment="Top" Data="M 0,16 C 8,1 44,1 52,16 C 44,25 8,25 0,16 Z"><Path.Fill><LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1"><GradientStop Color="#DDFFFFFF" Offset="0"/><GradientStop Color="#44FFFFFF" Offset="0.55"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></Path.Fill></Path><Canvas Width="52" Height="52"><Path Fill="#EEFFFFFF" Canvas.Left="20" Canvas.Top="17" Data="M 0,0 L 16,9 L 0,18 Z"/></Canvas></Grid>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="orbBody" Property="Opacity" Value="0.88"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="orbBody" Property="Opacity" Value="0.7"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="ToolBtn" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Width" Value="34"/><Setter Property="Height" Value="34"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="4" BorderThickness="1" BorderBrush="Transparent" Background="Transparent" Padding="5"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF4A6A90"/><Setter TargetName="bd" Property="Background" Value="{StaticResource PillHover}"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="{StaticResource PillPressed}"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.3"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="OverlayBtn" TargetType="Button">
+      <Setter Property="Foreground" Value="White"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border x:Name="bd" Background="#55000000" BorderBrush="#55FFFFFF" BorderThickness="1" CornerRadius="4" Padding="12,6"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#88000000"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="SmallToolBtn" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Width" Value="22"/><Setter Property="Height" Value="22"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="3" BorderThickness="1" BorderBrush="#FF3A5070" Background="#FF1A2636" Padding="2"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF6A9AC0"/><Setter TargetName="bd" Property="Background" Value="#FF2A3E58"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1A3050"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="ViewModeBtn" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Width" Value="24"/><Setter Property="Height" Value="22"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="3" BorderThickness="1" BorderBrush="#FF3A5070" Background="#FF1A2636" Padding="2"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="BorderBrush" Value="#FF6A9AC0"/><Setter TargetName="bd" Property="Background" Value="#FF2A3E58"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1A3050"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style x:Key="DetailHeaderBtn" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Height" Value="22"/><Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border x:Name="bd" Background="#FF151C28" BorderBrush="#FF2A3A4A" BorderThickness="0,0,1,1" Padding="6,2"><ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/></Border>
+      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1E2E44"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1A3050"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+
+    <Style TargetType="TreeViewItem">
+      <Setter Property="Foreground" Value="#FFAABBCC"/><Setter Property="FontSize" Value="12"/><Setter Property="Padding" Value="2,1"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TreeViewItem"><Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
+      <Border x:Name="Bd" Grid.Row="0" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="3" Margin="1">
+        <DockPanel><ToggleButton x:Name="Expander" DockPanel.Dock="Left" Width="16" Height="16" IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}" ClickMode="Press" Background="Transparent" BorderThickness="0" Cursor="Hand">
+          <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><Border Background="Transparent" Width="16" Height="16"><Path x:Name="arrow" Fill="#FF6A8AA8" HorizontalAlignment="Center" VerticalAlignment="Center" Data="M 0,0 L 6,4 L 0,8 Z"/></Border>
+          <ControlTemplate.Triggers><Trigger Property="IsChecked" Value="True"><Setter TargetName="arrow" Property="Data" Value="M 0,0 L 8,0 L 4,6 Z"/></Trigger><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="arrow" Property="Fill" Value="#FFAACCEE"/></Trigger></ControlTemplate.Triggers></ControlTemplate>
+        </ToggleButton.Template></ToggleButton><ContentPresenter x:Name="PART_Header" ContentSource="Header" Margin="2,0,0,0"/></DockPanel>
+      </Border><ItemsPresenter x:Name="ItemsHost" Grid.Row="1" Margin="18,0,0,0" Visibility="Collapsed"/></Grid>
+      <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="ItemsHost" Property="Visibility" Value="Visible"/></Trigger><Trigger Property="HasItems" Value="False"><Setter TargetName="Expander" Property="Visibility" Value="Hidden"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="Bd" Property="Background" Value="#FF1A3A5A"/></Trigger><MultiTrigger><MultiTrigger.Conditions><Condition Property="IsSelected" Value="False"/><Condition Property="IsMouseOver" Value="True"/></MultiTrigger.Conditions><Setter TargetName="Bd" Property="Background" Value="#FF1E2E44"/></MultiTrigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <DockPanel x:Name="MainView">
+      <Grid DockPanel.Dock="Bottom" Height="65">
+        <Border><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF1E2A3A" Offset="0"/><GradientStop Color="#FF111820" Offset="1"/></LinearGradientBrush></Border.Background></Border>
+        <Border Height="1" VerticalAlignment="Top" Background="#FF3A5070"/>
+        <TextBlock x:Name="FileCountLabel" Text="" Foreground="#FF7A8EA8" FontSize="10" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10,0,0,3"/>
+        <StackPanel HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,10,3" Orientation="Vertical">
+          <TextBlock x:Name="FileNameLabel" Text="" Foreground="#FF8AACCC" FontSize="10" TextAlignment="Right" TextTrimming="CharacterEllipsis" MaxWidth="400"/>
+          <TextBlock x:Name="FileInfoLabel" Text="" Foreground="#FF7A8EA8" FontSize="10" TextAlignment="Right"/>
+        </StackPanel>
+        <Grid VerticalAlignment="Center">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,28,0">
+            <Button x:Name="ZoomOutBtn" Style="{StaticResource ToolBtn}" ToolTip="Zoom out"><Canvas Width="20" Height="20"><Ellipse Width="13" Height="13" Stroke="#FFAACCEE" StrokeThickness="1.8"/><Line X1="3.5" Y1="6.5" X2="9.5" Y2="6.5" Stroke="#FFAACCEE" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/><Line X1="10" Y1="10" X2="18" Y2="18" Stroke="#FFAACCEE" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/></Canvas></Button>
+            <Button x:Name="FitBtn" Style="{StaticResource ToolBtn}" ToolTip="Best fit (F)" Margin="2,0"><Canvas Width="20" Height="20"><Path Fill="#FFAACCEE" Data="M 0,0 L 5,0 L 0,5 Z"/><Path Fill="#FFAACCEE" Data="M 15,0 L 20,0 L 20,5 Z"/><Path Fill="#FFAACCEE" Data="M 0,15 L 0,20 L 5,20 Z"/><Path Fill="#FFAACCEE" Data="M 20,15 L 20,20 L 15,20 Z"/></Canvas></Button>
+            <Button x:Name="ZoomInBtn" Style="{StaticResource ToolBtn}" ToolTip="Zoom in"><Canvas Width="20" Height="20"><Ellipse Width="13" Height="13" Stroke="#FFAACCEE" StrokeThickness="1.8"/><Line X1="3.5" Y1="6.5" X2="9.5" Y2="6.5" Stroke="#FFAACCEE" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/><Line X1="6.5" Y1="3.5" X2="6.5" Y2="9.5" Stroke="#FFAACCEE" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/><Line X1="10" Y1="10" X2="18" Y2="18" Stroke="#FFAACCEE" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/></Canvas></Button>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
+            <Button x:Name="PrevBtn" Style="{StaticResource NavPillBtn}" ToolTip="Previous" Margin="0,0,6,0"><Canvas Width="18" Height="16"><Rectangle Width="2.8" Height="14" Fill="#FFCCDDED" Canvas.Left="1" Canvas.Top="1" RadiusX="1" RadiusY="1"/><Path Fill="#FFCCDDED" Data="M 17,1 L 6,8 L 17,15 Z"/></Canvas></Button>
+            <Button x:Name="FSBtn" Style="{StaticResource OrbBtn}" ToolTip="Slideshow (F11)" Margin="0,0,6,0"/>
+            <Button x:Name="NextBtn" Style="{StaticResource NavPillBtn}" ToolTip="Next"><Canvas Width="18" Height="16"><Path Fill="#FFCCDDED" Data="M 1,1 L 12,8 L 1,15 Z"/><Rectangle Width="2.8" Height="14" Fill="#FFCCDDED" Canvas.Left="14.2" Canvas.Top="1" RadiusX="1" RadiusY="1"/></Canvas></Button>
+          </StackPanel>
+          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Left" Margin="28,0,0,0">
+            <Button x:Name="DeleteBtn" Style="{StaticResource ToolBtn}" ToolTip="Delete (Del)"><Canvas Width="20" Height="22"><Rectangle Width="14" Height="2" Fill="#FFDD6666" Canvas.Left="3" Canvas.Top="2" RadiusX="1" RadiusY="1"/><Rectangle Width="6" Height="1.5" Fill="#FFDD6666" Canvas.Left="7" Canvas.Top="0.5" RadiusX="1" RadiusY="1"/><Rectangle Width="12" Height="13" Canvas.Left="4" Canvas.Top="5" RadiusX="1.5" RadiusY="1.5" Fill="Transparent" Stroke="#FFDD6666" StrokeThickness="1.5"/><Line X1="8" Y1="7.5" X2="8" Y2="16" Stroke="#FFDD6666" StrokeThickness="1.2"/><Line X1="12" Y1="7.5" X2="12" Y2="16" Stroke="#FFDD6666" StrokeThickness="1.2"/></Canvas></Button>
+          </StackPanel>
+        </Grid>
+      </Grid>
+
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition x:Name="LeftPanelColumn" Width="280" MinWidth="0"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Background="#FF10151C" Width="28">
+          <Button x:Name="HamburgerBtn" VerticalAlignment="Top" Margin="2,8,2,0" Cursor="Hand" ToolTip="Toggle panel" Width="24" Height="24">
+            <Button.Template><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="3" Background="Transparent" BorderThickness="1" BorderBrush="Transparent" Padding="3"><Canvas Width="16" Height="14"><Rectangle Width="16" Height="2" Fill="#FFAABBCC" Canvas.Top="1"/><Rectangle Width="16" Height="2" Fill="#FFAABBCC" Canvas.Top="6"/><Rectangle Width="16" Height="2" Fill="#FFAABBCC" Canvas.Top="11"/></Canvas></Border>
+            <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1E2E44"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF3A5A78"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template>
+          </Button>
+        </Border>
+
+        <DockPanel x:Name="LeftPanel" Grid.Column="1" Background="#FF10151C">
+          <Border DockPanel.Dock="Top" Padding="6,6,6,4">
+            <Button x:Name="OpenFolderBtn" Height="28" Cursor="Hand" ToolTip="Open a folder">
+              <Button.Template><ControlTemplate TargetType="Button"><Border x:Name="bd" CornerRadius="4" BorderThickness="1" BorderBrush="#FF4A6A90" Background="#FF1E2E44" Padding="10,4"><StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Canvas Width="16" Height="14" Margin="0,1,6,0"><Path Fill="#FFCCAA44" Data="M 0,3 L 2,0 L 8,0 L 10,3 L 16,3 L 16,14 L 0,14 Z"/><Path Fill="#FFDDBB55" Data="M 0,5 L 3,5 L 5,12 L 16,12 L 16,5 L 13,5 Z"/></Canvas><TextBlock Text="Open Folder" Foreground="#FFAABBCC" FontSize="11" VerticalAlignment="Center"/></StackPanel></Border>
+              <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF2A3E58"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF6A9AC0"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1A3050"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Button.Template>
+            </Button>
+          </Border>
+          <Border DockPanel.Dock="Top" Padding="8,4,8,2"><TextBlock x:Name="FolderTreeHeader" Text="FOLDERS" Foreground="#FF6A8AA8" FontSize="10" FontWeight="SemiBold"/></Border>
+
+          <Border DockPanel.Dock="Bottom" Padding="6,3,6,3">
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="4,0,0,0">
+                <StackPanel x:Name="ThumbSizePanel" Orientation="Horizontal">
+                  <Button x:Name="ThumbSmallerBtn" Style="{StaticResource SmallToolBtn}" ToolTip="Smaller" Margin="0,0,2,0"><TextBlock Text="-" Foreground="#FFAACCEE" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-3,0,0"/></Button>
+                  <TextBlock x:Name="ThumbSizeLabel" Text="64" Foreground="#FF5A7A98" FontSize="9" VerticalAlignment="Center" Margin="2,0,2,0" MinWidth="18" TextAlignment="Center"/>
+                  <Button x:Name="ThumbLargerBtn" Style="{StaticResource SmallToolBtn}" ToolTip="Larger" Margin="0,0,4,0"><TextBlock Text="+" Foreground="#FFAACCEE" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-3,0,0"/></Button>
+                </StackPanel>
+                <Border Width="1" Background="#FF2A3A4A" Margin="2,2,4,2"/>
+                <Button x:Name="ViewThumbBtn" Style="{StaticResource ViewModeBtn}" ToolTip="Thumbnails" Margin="0,0,2,0">
+                  <Canvas Width="14" Height="14"><Rectangle Width="6" Height="6" Fill="#FFAACCEE"/><Rectangle Width="6" Height="6" Fill="#FFAACCEE" Canvas.Left="8"/><Rectangle Width="6" Height="6" Fill="#FFAACCEE" Canvas.Top="8"/><Rectangle Width="6" Height="6" Fill="#FFAACCEE" Canvas.Left="8" Canvas.Top="8"/></Canvas>
+                </Button>
+                <Button x:Name="ViewDetailBtn" Style="{StaticResource ViewModeBtn}" ToolTip="Details">
+                  <Canvas Width="14" Height="14"><Rectangle Width="3" Height="3" Fill="#FF6A8AA8" Canvas.Top="0.5" RadiusX="0.5" RadiusY="0.5"/><Rectangle Width="9" Height="2.5" Fill="#FFAACCEE" Canvas.Left="5" Canvas.Top="0.5"/><Rectangle Width="3" Height="3" Fill="#FF6A8AA8" Canvas.Top="5.5" RadiusX="0.5" RadiusY="0.5"/><Rectangle Width="9" Height="2.5" Fill="#FFAACCEE" Canvas.Left="5" Canvas.Top="5.5"/><Rectangle Width="3" Height="3" Fill="#FF6A8AA8" Canvas.Top="10.5" RadiusX="0.5" RadiusY="0.5"/><Rectangle Width="9" Height="2.5" Fill="#FFAACCEE" Canvas.Left="5" Canvas.Top="10.5"/></Canvas>
+                </Button>
+              </StackPanel>
+              <TextBlock x:Name="PreviewHeader" Text="IMAGES (0)" Foreground="#FF6A8AA8" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+          </Border>
+
+          <Border DockPanel.Dock="Bottom" Margin="4,2,4,4" CornerRadius="4" Background="#FF0C1018" BorderBrush="#FF2A3A4A" BorderThickness="1" Height="300" x:Name="PreviewListBorder">
+            <DockPanel>
+              <Grid x:Name="DetailHeaderRow" DockPanel.Dock="Top" Height="22" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition x:Name="DetailColNameDef" Width="200" MinWidth="60"/>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition x:Name="DetailColSizeDef" Width="80" MinWidth="40"/>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition x:Name="DetailColDateDef" Width="140" MinWidth="60"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="SortNameBtn" Grid.Column="0" Style="{StaticResource DetailHeaderBtn}"><TextBlock x:Name="SortNameText" Text="Name" Foreground="#FF8AACCC" FontSize="10"/></Button>
+                <GridSplitter Grid.Column="1" Width="3" Background="#FF2A3A4A" ResizeBehavior="PreviousAndNext" Cursor="SizeWE"/>
+                <Button x:Name="SortSizeBtn" Grid.Column="2" Style="{StaticResource DetailHeaderBtn}" HorizontalContentAlignment="Right"><TextBlock x:Name="SortSizeText" Text="Size" Foreground="#FF8AACCC" FontSize="10"/></Button>
+                <GridSplitter Grid.Column="3" Width="3" Background="#FF2A3A4A" ResizeBehavior="PreviousAndNext" Cursor="SizeWE"/>
+                <Button x:Name="SortDateBtn" Grid.Column="4" Style="{StaticResource DetailHeaderBtn}"><TextBlock x:Name="SortDateText" Text="Date modified" Foreground="#FF8AACCC" FontSize="10"/></Button>
+              </Grid>
+              <ListBox x:Name="ImagePreviewList" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling">
+                <ListBox.Resources><Style TargetType="ScrollBar" BasedOn="{StaticResource DarkVerticalScrollBar}"/></ListBox.Resources>
+                <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="Padding" Value="4,2"/><Setter Property="Margin" Value="1"/><Setter Property="Cursor" Value="Hand"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><Border x:Name="bd" CornerRadius="3" Padding="4,2" Background="Transparent" BorderThickness="1" BorderBrush="Transparent"><ContentPresenter/></Border>
+                  <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1E2E44"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF3A5A78"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="bd" Property="Background" Value="#FF1A3A5A"/><Setter TargetName="bd" Property="BorderBrush" Value="#FF4A7AAA"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+                </Style></ListBox.ItemContainerStyle>
+              </ListBox>
+            </DockPanel>
+          </Border>
+
+          <Border DockPanel.Dock="Bottom" Height="6" Background="#FF10151C" Cursor="SizeNS" x:Name="PanelSplitHandle"><Border Height="2" Background="#FF2A3A4A" CornerRadius="1" VerticalAlignment="Center" Margin="20,0,20,0"/></Border>
+          <Border Margin="4,2,4,2" CornerRadius="4" Background="#FF0C1018" BorderBrush="#FF2A3A4A" BorderThickness="1"><TreeView x:Name="FolderTree" Padding="2" Background="Transparent" BorderThickness="0"/></Border>
+        </DockPanel>
+
+        <GridSplitter x:Name="MainSplitter" Grid.Column="2" Width="5" Background="#FF2A3A4A" HorizontalAlignment="Center" VerticalAlignment="Stretch" ResizeBehavior="PreviousAndNext" Cursor="SizeWE"/>
+
+        <Grid x:Name="ImageContainer" Grid.Column="3" Background="#FF0C1018" ClipToBounds="True">
+          <ScrollViewer x:Name="Viewer" Style="{StaticResource DarkScrollViewer}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Background="Transparent">
+            <Grid x:Name="ImageWrapper" Background="Transparent"><Image x:Name="MainImage" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"><Image.LayoutTransform><ScaleTransform x:Name="ImageScale" ScaleX="1" ScaleY="1"/></Image.LayoutTransform></Image></Grid>
+          </ScrollViewer>
+          <Border IsHitTestVisible="False"><Border.Background><RadialGradientBrush GradientOrigin="0.5,0.5" Center="0.5,0.5" RadiusX="0.9" RadiusY="0.9"><GradientStop Color="#00000000" Offset="0.55"/><GradientStop Color="#28000000" Offset="1"/></RadialGradientBrush></Border.Background></Border>
+          <StackPanel x:Name="PlaceholderPanel" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Visible">
+            <Border Width="96" Height="76" CornerRadius="6" Margin="0,0,0,16" BorderBrush="#FF3A5070" BorderThickness="1"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF1E2E44" Offset="0"/><GradientStop Color="#FF111820" Offset="1"/></LinearGradientBrush></Border.Background><Canvas Width="56" Height="44" HorizontalAlignment="Center" VerticalAlignment="Center"><Rectangle Width="56" Height="44" Stroke="#FF3A6090" StrokeThickness="1.5" RadiusX="3" RadiusY="3" Fill="#FF0C1820"/><Ellipse Width="10" Height="10" Fill="#FF4488AA" Canvas.Left="6" Canvas.Top="5"/><Path Fill="#FF2A5A40" Data="M 0,40 L 18,24 L 32,34 L 44,18 L 56,40 Z"/></Canvas></Border>
+            <TextBlock Text="No image selected" Foreground="#FF8AA8CC" FontSize="18" FontWeight="Light" TextAlignment="Center" Margin="0,0,0,6"/>
+            <TextBlock Text="Press Ctrl+O or use the left panel" Foreground="#FF4A6080" FontSize="11" TextAlignment="Center" Margin="0,0,0,20"/>
+            <Button x:Name="PlaceholderOpenBtn" Style="{StaticResource OverlayBtn}" Content="Open Image..." HorizontalAlignment="Center" Foreground="#FFCCDDED" FontSize="12"/>
+          </StackPanel>
+          <Grid.ContextMenu><ContextMenu><MenuItem x:Name="MenuOpen" Header="Open…    Ctrl+O"/><Separator/><MenuItem x:Name="MenuFit" Header="Best Fit"/><MenuItem x:Name="MenuActual" Header="Actual Size (100%)"/></ContextMenu></Grid.ContextMenu>
+        </Grid>
+      </Grid>
+    </DockPanel>
+
+    <Border x:Name="FullScreenOverlay" Visibility="Collapsed" Background="Black" Focusable="True" Panel.ZIndex="200">
+      <Grid>
+        <Image x:Name="FSImage" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
+        <Border x:Name="FSBottomBar" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,24" Background="#BB000000" CornerRadius="6" Padding="16,7">
+          <StackPanel Orientation="Horizontal"><Button x:Name="FSPrevBtn" Background="Transparent" BorderThickness="0" Cursor="Hand" Width="38" Height="34" Margin="0,0,6,0"><Path Fill="White" Data="M 16,4 L 4,18 L 16,32 Z" Stretch="Uniform" Margin="10,6"/></Button><Button x:Name="FSPauseBtn" Background="Transparent" BorderThickness="0" Cursor="Hand" Width="38" Height="34" Margin="0,0,6,0"><Canvas Width="20" Height="20"><Rectangle Width="5" Height="16" Fill="White" Canvas.Left="2" Canvas.Top="2"/><Rectangle Width="5" Height="16" Fill="White" Canvas.Left="13" Canvas.Top="2"/></Canvas></Button><Button x:Name="FSExitBtn" Background="Transparent" BorderThickness="0" Cursor="Hand" Width="38" Height="34" Margin="0,0,6,0"><Path Stroke="White" StrokeThickness="2.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 4,4 L 16,16 M 16,4 L 4,16" Stretch="Uniform" Margin="10,10"/></Button><Button x:Name="FSNextBtn" Background="Transparent" BorderThickness="0" Cursor="Hand" Width="38" Height="34"><Path Fill="White" Data="M 4,4 L 16,18 L 4,32 Z" Stretch="Uniform" Margin="10,6"/></Button></StackPanel>
+        </Border>
+        <Border x:Name="FSCountLabelBorder" Background="#88000000" CornerRadius="3" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,12,18,0" Padding="4,2"><TextBlock x:Name="FSCountLabel" Text="" Foreground="White" FontSize="13"/></Border>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+"@
+
+try { $reader=[System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xamlString)); $window=[System.Windows.Markup.XamlReader]::Load($reader) } catch { Write-Host "XAML FAILED: $($_.Exception.Message)" -ForegroundColor Red; exit }
+
+$window.Width=$script:config.WindowWidth; $window.Height=$script:config.WindowHeight
+if($script:config.WindowLeft -ge 0 -and $script:config.WindowTop -ge 0){$window.WindowStartupLocation=[System.Windows.WindowStartupLocation]::Manual; $window.Left=$script:config.WindowLeft; $window.Top=$script:config.WindowTop}
+if($script:config.WindowState -eq "Maximized"){$window.WindowState=[System.Windows.WindowState]::Maximized}
+
+$MainImage=$window.FindName("MainImage"); $FSImage=$window.FindName("FSImage"); $Overlay=$window.FindName("FullScreenOverlay")
+$Viewer=$window.FindName("Viewer"); $ImageScale=$window.FindName("ImageScale")
+$PlaceholderPanel=$window.FindName("PlaceholderPanel"); $PlaceholderOpenBtn=$window.FindName("PlaceholderOpenBtn")
+$FileInfoLabel=$window.FindName("FileInfoLabel"); $FileCountLabel=$window.FindName("FileCountLabel"); $FileNameLabel=$window.FindName("FileNameLabel")
+$FSBottomBar=$window.FindName("FSBottomBar"); $FSCountLabelBorder=$window.FindName("FSCountLabelBorder"); $FSCountLabel=$window.FindName("FSCountLabel")
+$ZoomInBtn=$window.FindName("ZoomInBtn"); $ZoomOutBtn=$window.FindName("ZoomOutBtn"); $FitBtn=$window.FindName("FitBtn")
+$FSBtn=$window.FindName("FSBtn"); $NextBtn=$window.FindName("NextBtn"); $PrevBtn=$window.FindName("PrevBtn")
+$FSNextBtn=$window.FindName("FSNextBtn"); $FSPrevBtn=$window.FindName("FSPrevBtn"); $FSPauseBtn=$window.FindName("FSPauseBtn"); $FSExitBtn=$window.FindName("FSExitBtn")
+$DeleteBtn=$window.FindName("DeleteBtn"); $MenuOpen=$window.FindName("MenuOpen"); $MenuFit=$window.FindName("MenuFit"); $MenuActual=$window.FindName("MenuActual")
+$OpenFolderBtn=$window.FindName("OpenFolderBtn"); $FolderTree=$window.FindName("FolderTree"); $FolderTreeHeader=$window.FindName("FolderTreeHeader")
+$ImagePreviewList=$window.FindName("ImagePreviewList"); $PreviewHeader=$window.FindName("PreviewHeader"); $LeftPanelColumn=$window.FindName("LeftPanelColumn")
+$ThumbSmallerBtn=$window.FindName("ThumbSmallerBtn"); $ThumbLargerBtn=$window.FindName("ThumbLargerBtn"); $ThumbSizeLabel=$window.FindName("ThumbSizeLabel"); $ThumbSizePanel=$window.FindName("ThumbSizePanel")
+$PreviewListBorder=$window.FindName("PreviewListBorder"); $PanelSplitHandle=$window.FindName("PanelSplitHandle")
+$ViewThumbBtn=$window.FindName("ViewThumbBtn"); $ViewDetailBtn=$window.FindName("ViewDetailBtn")
+$HamburgerBtn=$window.FindName("HamburgerBtn"); $LeftPanel=$window.FindName("LeftPanel"); $MainSplitter=$window.FindName("MainSplitter")
+$DetailHeaderRow=$window.FindName("DetailHeaderRow")
+$SortNameBtn=$window.FindName("SortNameBtn"); $SortSizeBtn=$window.FindName("SortSizeBtn"); $SortDateBtn=$window.FindName("SortDateBtn")
+$SortNameText=$window.FindName("SortNameText"); $SortSizeText=$window.FindName("SortSizeText"); $SortDateText=$window.FindName("SortDateText")
+$DetailColNameDef=$window.FindName("DetailColNameDef"); $DetailColSizeDef=$window.FindName("DetailColSizeDef"); $DetailColDateDef=$window.FindName("DetailColDateDef")
+
+$LeftPanelColumn.Width=[System.Windows.GridLength]::new($script:config.LeftPanelWidth,[System.Windows.GridUnitType]::Pixel)
+$PreviewListBorder.Height=$script:config.PreviewListHeight
+$DetailColNameDef.Width=[System.Windows.GridLength]::new($script:config.DetailColName,[System.Windows.GridUnitType]::Pixel)
+$DetailColSizeDef.Width=[System.Windows.GridLength]::new($script:config.DetailColSize,[System.Windows.GridUnitType]::Pixel)
+$DetailColDateDef.Width=[System.Windows.GridLength]::new($script:config.DetailColDate,[System.Windows.GridUnitType]::Pixel)
+
+$script:images=New-Object System.Collections.Generic.List[string]; $script:imageCache=New-Object 'System.Collections.Generic.Dictionary[string,byte[]]'
+$script:allFolderFiles=@(); $script:currentIndex=0; $script:currentZoom=1.0; $script:fitZoom=1.0
+$script:slideshowTimer=$null; $script:slideshowRunning=$false; $script:isDragging=$false; $script:dragStartPos=$null; $script:dragStartHOffset=0; $script:dragStartVOffset=0
+$script:oldResizeMode='CanResize'; $script:lastMousePos=$null; $script:currentFolder=$null; $script:updatingSelection=$false
+$script:thumbSize=$script:config.ThumbSize; $script:thumbSizes=@(32,48,64,80,96,120,160,200)
+$script:zoomMode=$script:config.ZoomMode; $script:viewMode=$script:config.ViewMode
+$script:splitDragging=$false; $script:splitDragStartY=0; $script:splitDragStartH=0
+$script:panelVisible=$script:config.LeftPanelVisible -ne 0
+$script:sortColumn=$script:config.SortColumn; $script:sortDirection=$script:config.SortDirection
+$script:maxPreviewLoad=200; $script:scrollSpeed=30
+$ThumbSizeLabel.Text="$($script:thumbSize)"
+
+function Apply-PanelVisibility{if($script:panelVisible){$LeftPanel.Visibility='Visible'; $MainSplitter.Visibility='Visible'; $LeftPanelColumn.Width=[System.Windows.GridLength]::new([Math]::Max($script:config.LeftPanelWidth,140),[System.Windows.GridUnitType]::Pixel); $LeftPanelColumn.MinWidth=140}else{$LeftPanel.Visibility='Collapsed'; $MainSplitter.Visibility='Collapsed'; $LeftPanelColumn.MinWidth=0; $LeftPanelColumn.Width=[System.Windows.GridLength]::new(0,[System.Windows.GridUnitType]::Pixel)}}
+Apply-PanelVisibility
+
+function Apply-ViewMode{if($script:viewMode -eq "Details"){$DetailHeaderRow.Visibility='Visible'; $ThumbSizePanel.Visibility='Collapsed'}else{$DetailHeaderRow.Visibility='Collapsed'; $ThumbSizePanel.Visibility='Visible'}}
+Apply-ViewMode
+
+function Update-SortIndicators{$a=if($script:sortDirection -eq "Ascending"){" ▲"}else{" ▼"}; $SortNameText.Text=if($script:sortColumn -eq "Name"){"Name$a"}else{"Name"}; $SortSizeText.Text=if($script:sortColumn -eq "Size"){"Size$a"}else{"Size"}; $SortDateText.Text=if($script:sortColumn -eq "Date"){"Date modified$a"}else{"Date modified"}}
+Update-SortIndicators
+
+$script:fsIdleTimer=New-Object System.Windows.Threading.DispatcherTimer; $script:fsIdleTimer.Interval=[TimeSpan]::FromSeconds(5)
+$script:fsIdleTimer.Add_Tick({if($Overlay.Visibility -eq 'Visible'){$window.Cursor=[System.Windows.Input.Cursors]::None; $FSBottomBar.Visibility='Collapsed'; $FSCountLabelBorder.Visibility='Collapsed'; $script:fsIdleTimer.Stop()}})
+$Overlay.Add_MouseMove({param($s,$e); if($Overlay.Visibility -ne 'Visible'){return}; $p=$e.GetPosition($Overlay); if($null -eq $script:lastMousePos){$script:lastMousePos=$p;return}; if([Math]::Abs($p.X-$script:lastMousePos.X) -gt 2 -or [Math]::Abs($p.Y-$script:lastMousePos.Y) -gt 2){$script:lastMousePos=$p; if($window.Cursor -eq [System.Windows.Input.Cursors]::None){$window.Cursor=[System.Windows.Input.Cursors]::Arrow; $FSBottomBar.Visibility='Visible'; $FSCountLabelBorder.Visibility='Visible'}; $script:fsIdleTimer.Stop(); $script:fsIdleTimer.Start()}})
+$window.Add_StateChanged({if($window.WindowState -eq 'Minimized'){[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()}})
+
+$PanelSplitHandle.Add_MouseLeftButtonDown({param($s,$e); $script:splitDragging=$true; $script:splitDragStartY=($e.GetPosition($window)).Y; $script:splitDragStartH=$PreviewListBorder.Height; $PanelSplitHandle.CaptureMouse()|Out-Null; $e.Handled=$true})
+$PanelSplitHandle.Add_MouseMove({param($s,$e); if(-not $script:splitDragging){return}; $newH=$script:splitDragStartH+($script:splitDragStartY-($e.GetPosition($window)).Y); if($newH -lt 60){$newH=60}; if($newH -gt 800){$newH=800}; $PreviewListBorder.Height=$newH; $e.Handled=$true})
+$PanelSplitHandle.Add_MouseLeftButtonUp({param($s,$e); if($script:splitDragging){$script:splitDragging=$false; $PanelSplitHandle.ReleaseMouseCapture(); $e.Handled=$true}})
+
+# Slower mouse wheel scroll
+$PreviewListBorder.Add_PreviewMouseWheel({param($s,$e); $lb=$ImagePreviewList; if($null -ne $lb -and [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($lb) -gt 0){$dec=[System.Windows.Media.VisualTreeHelper]::GetChild($lb,0); if($null -ne $dec -and [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($dec) -gt 0){$sv=[System.Windows.Media.VisualTreeHelper]::GetChild($dec,0); if($null -ne $sv -and $sv -is [System.Windows.Controls.ScrollViewer]){$delta=if($e.Delta -gt 0){-$script:scrollSpeed}else{$script:scrollSpeed}; $sv.ScrollToVerticalOffset($sv.VerticalOffset+$delta); $e.Handled=$true}}}})
+
+function Format-FileSize([long]$b){if($b -ge 1MB){"{0:N1} MB" -f ($b/1MB)}elseif($b -ge 1KB){"{0:N0} KB" -f ($b/1KB)}else{"$b bytes"}}
+function Get-FitZoom{if($null -eq $MainImage.Source){return 1.0}; $iw=$MainImage.Source.PixelWidth; $ih=$MainImage.Source.PixelHeight; $vw=$Viewer.ActualWidth-16; $vh=$Viewer.ActualHeight-16; if($vw -le 0 -or $vh -le 0 -or $iw -le 0 -or $ih -le 0){return 1.0}; $s=[Math]::Min($vw/$iw,$vh/$ih); if($s -gt 1.0){$s=1.0}; return $s}
+function Apply-Zoom([double]$z){if($z -lt 0.04){$z=0.04}; if($z -gt 12.0){$z=12.0}; $script:currentZoom=$z; $ImageScale.ScaleX=$z; $ImageScale.ScaleY=$z}
+function Fit-ToWindow{$script:fitZoom=Get-FitZoom; Apply-Zoom $script:fitZoom}
+function Apply-ZoomMode{if($script:zoomMode -eq "ActualSize"){Apply-Zoom 1.0}else{Fit-ToWindow}}
+
+function Create-Thumbnail([string]$path,[int]$size=64){try{$bytes=[System.IO.File]::ReadAllBytes($path); $stream=New-Object System.IO.MemoryStream(,$bytes); try{$bmp=New-Object System.Windows.Media.Imaging.BitmapImage; $bmp.BeginInit(); $bmp.CacheOption=[System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad; $bmp.StreamSource=$stream; $bmp.DecodePixelWidth=$size; $bmp.EndInit(); $bmp.Freeze(); return $bmp}finally{$stream.Dispose()}}catch{return $null}}
+
+# Picture frame icon for details view
+function New-PictureIcon {
+    $canvas = New-Object System.Windows.Controls.Canvas
+    $canvas.Width = 12; $canvas.Height = 12; $canvas.Margin = [System.Windows.Thickness]::new(0,0,5,0)
+    # Frame border
+    $frame = New-Object System.Windows.Shapes.Rectangle
+    $frame.Width = 12; $frame.Height = 10; $frame.RadiusX = 1; $frame.RadiusY = 1
+    $frame.Stroke = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF6A8AA8"))
+    $frame.StrokeThickness = 1.2; $frame.Fill = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF182838"))
+    [System.Windows.Controls.Canvas]::SetTop($frame, 1)
+    $canvas.Children.Add($frame) | Out-Null
+    # Sun circle
+    $sun = New-Object System.Windows.Shapes.Ellipse
+    $sun.Width = 3; $sun.Height = 3; $sun.Fill = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF88AACC"))
+    [System.Windows.Controls.Canvas]::SetLeft($sun, 2); [System.Windows.Controls.Canvas]::SetTop($sun, 3)
+    $canvas.Children.Add($sun) | Out-Null
+    # Mountain
+    $mountain = New-Object System.Windows.Shapes.Path
+    $mountain.Fill = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF3A7A5A"))
+    $mountain.Data = [System.Windows.Media.Geometry]::Parse("M 1,10 L 4,5 L 7,8 L 9,4 L 11,10 Z")
+    $canvas.Children.Add($mountain) | Out-Null
+    return $canvas
+}
+
+function New-PreviewElement-Thumbnails([string]$path,[int]$thumbPixels){
+    $fi=[System.IO.FileInfo]::new($path); $thumb=Create-Thumbnail $path $thumbPixels; $sizeStr=Format-FileSize $fi.Length
+    $stack=New-Object System.Windows.Controls.StackPanel; $stack.Orientation=[System.Windows.Controls.Orientation]::Vertical; $stack.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Stretch
+    $tb=New-Object System.Windows.Controls.Border; $tb.Width=$thumbPixels+4; $tb.Height=$thumbPixels+4; $tb.CornerRadius=[System.Windows.CornerRadius]::new(3)
+    $tb.Background=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF0A0E14"))
+    $tb.BorderBrush=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF2A3A4A")); $tb.BorderThickness=[System.Windows.Thickness]::new(1)
+    $tb.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Center
+    $img=New-Object System.Windows.Controls.Image; $img.Source=$thumb; $img.Stretch=[System.Windows.Media.Stretch]::Uniform; $img.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Center; $img.VerticalAlignment=[System.Windows.VerticalAlignment]::Center; $img.Margin=[System.Windows.Thickness]::new(2)
+    [System.Windows.Media.RenderOptions]::SetBitmapScalingMode($img,[System.Windows.Media.BitmapScalingMode]::HighQuality); $tb.Child=$img; $stack.Children.Add($tb)|Out-Null
+    $nb=New-Object System.Windows.Controls.TextBlock; $nb.Text=$fi.Name; $nb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FFBBCCDD")); $nb.FontSize=9; $nb.TextTrimming=[System.Windows.TextTrimming]::CharacterEllipsis; $nb.TextAlignment=[System.Windows.TextAlignment]::Center; $nb.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Center; $nb.Margin=[System.Windows.Thickness]::new(2,3,2,0); $nb.ToolTip=$fi.Name; $nb.MaxWidth=$thumbPixels+20; $stack.Children.Add($nb)|Out-Null
+    $sb=New-Object System.Windows.Controls.TextBlock; $sb.Text=$sizeStr; $sb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF5A7A98")); $sb.FontSize=8; $sb.TextAlignment=[System.Windows.TextAlignment]::Center; $sb.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Center; $sb.Margin=[System.Windows.Thickness]::new(0,1,0,2); $stack.Children.Add($sb)|Out-Null
+    return $stack
+}
+
+function New-PreviewElement-Details([string]$path) {
+    $fi=[System.IO.FileInfo]::new($path); $sizeStr=Format-FileSize $fi.Length; $modStr=$fi.LastWriteTime.ToString("g")
+    # Use same column defs as header via binding widths
+    $grid=New-Object System.Windows.Controls.Grid; $grid.Height=22
+    $c0=New-Object System.Windows.Controls.ColumnDefinition; $c1=New-Object System.Windows.Controls.ColumnDefinition; $c2=New-Object System.Windows.Controls.ColumnDefinition; $c3=New-Object System.Windows.Controls.ColumnDefinition; $c4=New-Object System.Windows.Controls.ColumnDefinition
+    # Bind widths to header column defs
+    $b0=New-Object System.Windows.Data.Binding("Width"); $b0.Source=$DetailColNameDef; $b0.Mode=[System.Windows.Data.BindingMode]::OneWay; [System.Windows.Data.BindingOperations]::SetBinding($c0,[System.Windows.Controls.ColumnDefinition]::WidthProperty,$b0)|Out-Null
+    $c1.Width=[System.Windows.GridLength]::new(3,[System.Windows.GridUnitType]::Pixel)
+    $b2=New-Object System.Windows.Data.Binding("Width"); $b2.Source=$DetailColSizeDef; $b2.Mode=[System.Windows.Data.BindingMode]::OneWay; [System.Windows.Data.BindingOperations]::SetBinding($c2,[System.Windows.Controls.ColumnDefinition]::WidthProperty,$b2)|Out-Null
+    $c3.Width=[System.Windows.GridLength]::new(3,[System.Windows.GridUnitType]::Pixel)
+    $b4=New-Object System.Windows.Data.Binding("Width"); $b4.Source=$DetailColDateDef; $b4.Mode=[System.Windows.Data.BindingMode]::OneWay; [System.Windows.Data.BindingOperations]::SetBinding($c4,[System.Windows.Controls.ColumnDefinition]::WidthProperty,$b4)|Out-Null
+    $grid.ColumnDefinitions.Add($c0); $grid.ColumnDefinitions.Add($c1); $grid.ColumnDefinitions.Add($c2); $grid.ColumnDefinitions.Add($c3); $grid.ColumnDefinitions.Add($c4)
+
+    $namePanel=New-Object System.Windows.Controls.StackPanel; $namePanel.Orientation=[System.Windows.Controls.Orientation]::Horizontal; $namePanel.VerticalAlignment=[System.Windows.VerticalAlignment]::Center
+    $icon = New-PictureIcon
+    $namePanel.Children.Add($icon)|Out-Null
+    $nb=New-Object System.Windows.Controls.TextBlock; $nb.Text=$fi.Name; $nb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FFBBCCDD")); $nb.FontSize=11; $nb.TextTrimming=[System.Windows.TextTrimming]::CharacterEllipsis; $nb.ToolTip=$fi.Name; $nb.VerticalAlignment=[System.Windows.VerticalAlignment]::Center
+    $namePanel.Children.Add($nb)|Out-Null; [System.Windows.Controls.Grid]::SetColumn($namePanel,0); $grid.Children.Add($namePanel)|Out-Null
+
+    $szb=New-Object System.Windows.Controls.TextBlock; $szb.Text=$sizeStr; $szb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF7A9AB8")); $szb.FontSize=10; $szb.VerticalAlignment=[System.Windows.VerticalAlignment]::Center; $szb.TextAlignment=[System.Windows.TextAlignment]::Right; $szb.Margin=[System.Windows.Thickness]::new(4,0,4,0)
+    [System.Windows.Controls.Grid]::SetColumn($szb,2); $grid.Children.Add($szb)|Out-Null
+
+    $db=New-Object System.Windows.Controls.TextBlock; $db.Text=$modStr; $db.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF5A7A98")); $db.FontSize=10; $db.VerticalAlignment=[System.Windows.VerticalAlignment]::Center; $db.Margin=[System.Windows.Thickness]::new(4,0,2,0)
+    [System.Windows.Controls.Grid]::SetColumn($db,4); $grid.Children.Add($db)|Out-Null
+    return $grid
+}
+
+function New-PreviewElement([string]$path,[int]$thumbPixels){if($script:viewMode -eq "Details"){return New-PreviewElement-Details $path}else{return New-PreviewElement-Thumbnails $path $thumbPixels}}
+
+function Get-SortedFiles([string[]]$files){
+    $infos=$files|ForEach-Object{[System.IO.FileInfo]::new($_)}
+    switch($script:sortColumn){"Size"{$sorted=if($script:sortDirection -eq "Ascending"){$infos|Sort-Object Length}else{$infos|Sort-Object Length -Descending}} "Date"{$sorted=if($script:sortDirection -eq "Ascending"){$infos|Sort-Object LastWriteTime}else{$infos|Sort-Object LastWriteTime -Descending}} default{$sorted=if($script:sortDirection -eq "Ascending"){$infos|Sort-Object Name}else{$infos|Sort-Object Name -Descending}}}
+    return @($sorted|ForEach-Object{$_.FullName})
+}
+
+function Populate-ImagePreviews([string]$folderPath){
+    $ImagePreviewList.Items.Clear(); $script:images.Clear(); $script:imageCache.Clear(); $script:currentFolder=$folderPath
+    # Only files directly in this folder, not subdirs
+    $script:allFolderFiles=@([System.IO.Directory]::GetFiles($folderPath)|Where-Object{$script:supportedExts -contains [System.IO.Path]::GetExtension($_).ToLower()})
+    $sortedAll=Get-SortedFiles $script:allFolderFiles; foreach($f in $sortedAll){$script:images.Add($f)}
+    $PreviewHeader.Text="IMAGES ($($script:images.Count))"; $fn=[System.IO.Path]::GetFileName($folderPath); if([string]::IsNullOrEmpty($fn)){$fn=$folderPath}; $FolderTreeHeader.Text="FOLDERS - $fn"
+    if($script:images.Count -eq 0){return}
+    $loadCount=[Math]::Min($script:images.Count,$script:maxPreviewLoad)
+    $script:batchIndex=0; $script:batchSize=10; $script:batchMax=$loadCount; $script:fileList=$script:images.ToArray()
+    $script:batchAction=[System.Action]{$s=$script:batchIndex; $e=[Math]::Min($s+$script:batchSize,$script:batchMax); for($i=$s;$i -lt $e;$i++){$el=New-PreviewElement $script:fileList[$i] $script:thumbSize; $ImagePreviewList.Items.Add($el)|Out-Null}; $script:batchIndex=$e
+        if($script:batchIndex -lt $script:batchMax){$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,$script:batchAction)|Out-Null}
+        elseif($script:batchMax -lt $script:images.Count){$mb=New-Object System.Windows.Controls.TextBlock; $mb.Text="... $($script:images.Count-$script:batchMax) more - click to load all"; $mb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF6A9AC0")); $mb.FontSize=11; $mb.TextAlignment=[System.Windows.TextAlignment]::Center; $mb.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Center; $mb.Margin=[System.Windows.Thickness]::new(0,6,0,6); $mb.Cursor=[System.Windows.Input.Cursors]::Hand; $ImagePreviewList.Items.Add($mb)|Out-Null}}
+    $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,$script:batchAction)|Out-Null
+}
+
+function Load-MorePreviews{if($ImagePreviewList.Items.Count -gt 0){$last=$ImagePreviewList.Items[$ImagePreviewList.Items.Count-1]; if($last -is [System.Windows.Controls.TextBlock]){$ImagePreviewList.Items.RemoveAt($ImagePreviewList.Items.Count-1)}}; $startFrom=$script:batchMax; $script:batchMax=$script:images.Count; $script:batchIndex=$startFrom
+    $script:batchAction=[System.Action]{$s=$script:batchIndex; $e=[Math]::Min($s+$script:batchSize,$script:batchMax); for($i=$s;$i -lt $e;$i++){$el=New-PreviewElement $script:fileList[$i] $script:thumbSize; $ImagePreviewList.Items.Add($el)|Out-Null}; $script:batchIndex=$e; if($script:batchIndex -lt $script:batchMax){$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,$script:batchAction)|Out-Null}}
+    $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,$script:batchAction)|Out-Null}
+
+function Rebuild-Previews{if($null -eq $script:currentFolder -or -not [System.IO.Directory]::Exists($script:currentFolder)){return}; $sortedAll=Get-SortedFiles $script:allFolderFiles; $script:images.Clear(); foreach($f in $sortedAll){$script:images.Add($f)}; $ImagePreviewList.Items.Clear(); if($script:images.Count -eq 0){return}
+    $loadCount=[Math]::Min($script:images.Count,$script:maxPreviewLoad); $script:batchIndex=0; $script:batchSize=10; $script:batchMax=$loadCount; $script:fileList=$script:images.ToArray()
+    $script:batchAction=[System.Action]{$s=$script:batchIndex; $e=[Math]::Min($s+$script:batchSize,$script:batchMax); for($i=$s;$i -lt $e;$i++){$el=New-PreviewElement $script:fileList[$i] $script:thumbSize; $ImagePreviewList.Items.Add($el)|Out-Null}; $script:batchIndex=$e
+        if($script:batchIndex -lt $script:batchMax){$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,$script:batchAction)|Out-Null}
+        else{if($script:batchMax -lt $script:images.Count){$mb=New-Object System.Windows.Controls.TextBlock; $mb.Text="... $($script:images.Count-$script:batchMax) more - click to load all"; $mb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF6A9AC0")); $mb.FontSize=11; $mb.TextAlignment=[System.Windows.TextAlignment]::Center; $mb.HorizontalAlignment=[System.Windows.HorizontalAlignment]::Center; $mb.Margin=[System.Windows.Thickness]::new(0,6,0,6); $mb.Cursor=[System.Windows.Input.Cursors]::Hand; $ImagePreviewList.Items.Add($mb)|Out-Null}
+            $script:updatingSelection=$true; if($ImagePreviewList.Items.Count -gt $script:currentIndex -and $script:currentIndex -ge 0){$ImagePreviewList.SelectedIndex=$script:currentIndex; $ImagePreviewList.ScrollIntoView($ImagePreviewList.SelectedItem)}; $script:updatingSelection=$false}}
+    $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,$script:batchAction)|Out-Null}
+
+function Build-FolderTree([string]$rootPath){$FolderTree.Items.Clear(); $ri=New-Object System.Windows.Controls.TreeViewItem; $rn=[System.IO.Path]::GetFileName($rootPath); if([string]::IsNullOrEmpty($rn)){$rn=$rootPath}
+    $hp=New-Object System.Windows.Controls.StackPanel; $hp.Orientation=[System.Windows.Controls.Orientation]::Horizontal
+    $ic=New-Object System.Windows.Controls.Canvas; $ic.Width=16; $ic.Height=14; $ic.Margin=[System.Windows.Thickness]::new(0,1,6,0); $fp=New-Object System.Windows.Shapes.Path; $fp.Fill=[System.Windows.Media.Brushes]::Goldenrod; $fp.Data=[System.Windows.Media.Geometry]::Parse("M 0,3 L 2,0 L 8,0 L 10,3 L 16,3 L 16,14 L 0,14 Z"); $ic.Children.Add($fp)|Out-Null
+    $lb=New-Object System.Windows.Controls.TextBlock; $lb.Text=$rn; $lb.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FFCCDDEE")); $lb.FontWeight=[System.Windows.FontWeights]::SemiBold
+    # Count images in root dir only
+    $rootImgCount = @([System.IO.Directory]::GetFiles($rootPath) | Where-Object { $script:supportedExts -contains [System.IO.Path]::GetExtension($_).ToLower() }).Count
+    $hp.Children.Add($ic)|Out-Null; $hp.Children.Add($lb)|Out-Null
+    if ($rootImgCount -gt 0) { $cl=New-Object System.Windows.Controls.TextBlock; $cl.Text=" ($rootImgCount)"; $cl.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF5A7A98")); $cl.FontSize=10; $hp.Children.Add($cl)|Out-Null }
+    $ri.Header=$hp; $ri.Tag=$rootPath; $ri.IsExpanded=$true; Add-SubFolders $ri $rootPath 0 3; $FolderTree.Items.Add($ri)|Out-Null}
+
+function Add-SubFolders([System.Windows.Controls.TreeViewItem]$parentItem,[string]$parentPath,[int]$depth,[int]$maxDepth){
+    if($depth -ge $maxDepth){return}; try{$dirs=[System.IO.Directory]::GetDirectories($parentPath)|Sort-Object}catch{return}
+    foreach($d in $dirs){$dn=[System.IO.Path]::GetFileName($d)
+        try{$at=[System.IO.File]::GetAttributes($d); if($at -band [System.IO.FileAttributes]::Hidden){continue}; if($at -band [System.IO.FileAttributes]::System){continue}}catch{continue}
+        $si=New-Object System.Windows.Controls.TreeViewItem; $sp=New-Object System.Windows.Controls.StackPanel; $sp.Orientation=[System.Windows.Controls.Orientation]::Horizontal
+        $ic2=New-Object System.Windows.Controls.Canvas; $ic2.Width=14; $ic2.Height=12; $ic2.Margin=[System.Windows.Thickness]::new(0,2,5,0)
+        $fp2=New-Object System.Windows.Shapes.Path; $fp2.Fill=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF998844")); $fp2.Data=[System.Windows.Media.Geometry]::Parse("M 0,2.5 L 1.5,0 L 6,0 L 7.5,2.5 L 14,2.5 L 14,12 L 0,12 Z"); $ic2.Children.Add($fp2)|Out-Null
+        $lb2=New-Object System.Windows.Controls.TextBlock; $lb2.Text=$dn; $lb2.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FFAABBCC"))
+        $sp.Children.Add($ic2)|Out-Null; $sp.Children.Add($lb2)|Out-Null
+        # Count images directly in this subfolder only
+        try{$cnt=@([System.IO.Directory]::GetFiles($d)|Where-Object{$script:supportedExts -contains [System.IO.Path]::GetExtension($_).ToLower()}).Count
+            if($cnt -gt 0){$cl=New-Object System.Windows.Controls.TextBlock; $cl.Text=" ($cnt)"; $cl.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.ColorConverter]::ConvertFromString("#FF5A7A98")); $cl.FontSize=10; $sp.Children.Add($cl)|Out-Null}}catch{}
+        $si.Header=$sp; $si.Tag=$d; Add-SubFolders $si $d ($depth+1) $maxDepth; $parentItem.Items.Add($si)|Out-Null}}
+
+function Preload-Images{if($script:images.Count -le 1){return}; $cp=$script:images[$script:currentIndex]; $pi=($script:currentIndex-1+$script:images.Count)%$script:images.Count; $ni=($script:currentIndex+1)%$script:images.Count; $pp=$script:images[$pi]; $np=$script:images[$ni]; $kr=@(); foreach($k in $script:imageCache.Keys){if($k -ne $cp -and $k -ne $pp -and $k -ne $np){$kr+=$k}}; foreach($k in $kr){$script:imageCache.Remove($k)}; $pa=[System.Action[string]]{param($pt); if($null -ne $script:imageCache -and -not $script:imageCache.ContainsKey($pt)){try{$script:imageCache[$pt]=[System.IO.File]::ReadAllBytes($pt)}catch{}}}; foreach($p in @($np,$pp)){if(-not $script:imageCache.ContainsKey($p)){$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::SystemIdle,$pa,$p)|Out-Null}}}
+function Load-Image([string]$path){try{$bytes=$null; if($script:imageCache.ContainsKey($path)){$bytes=$script:imageCache[$path]}else{$bytes=[System.IO.File]::ReadAllBytes($path)}; $stream=New-Object System.IO.MemoryStream(,$bytes); try{$bmp=New-Object System.Windows.Media.Imaging.BitmapImage; $bmp.BeginInit(); $bmp.CacheOption=[System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad; $bmp.StreamSource=$stream; $bmp.EndInit(); $bmp.Freeze(); return $bmp}finally{$stream.Dispose()}}catch{return $null}}
+
+function Update-Image{
+    if($script:images.Count -eq 0){$PlaceholderPanel.Visibility='Visible'; $MainImage.Source=$null; $FSImage.Source=$null; $FileInfoLabel.Text=""; $FileCountLabel.Text=""; $FileNameLabel.Text=""; $window.Title="Windows Photo Viewer"; return}
+    $PlaceholderPanel.Visibility='Collapsed'; $path=$script:images[$script:currentIndex]; $bmp=Load-Image $path
+    if($null -eq $bmp){$MainImage.Source=$null; $FSImage.Source=$null; $FileInfoLabel.Text="Error"; $FileCountLabel.Text="$($script:currentIndex+1) of $($script:images.Count)"; $FileNameLabel.Text=""; $window.Title="Windows Photo Viewer"; return}
+    $MainImage.Source=$bmp; $FSImage.Source=$bmp; $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Loaded,[System.Action]{Apply-ZoomMode})|Out-Null
+    $fi=[System.IO.FileInfo]::new($path); $FileNameLabel.Text=$fi.Name; $FileInfoLabel.Text="$($bmp.PixelWidth) x $($bmp.PixelHeight)  |  $(Format-FileSize $fi.Length)"; $FileCountLabel.Text="$($script:currentIndex+1) of $($script:images.Count)"; $FSCountLabel.Text="$($script:currentIndex+1) / $($script:images.Count)"; $window.Title="$($fi.Name) - Windows Photo Viewer"
+    $script:updatingSelection=$true; if($ImagePreviewList.Items.Count -gt $script:currentIndex){$ImagePreviewList.SelectedIndex=$script:currentIndex; $ImagePreviewList.ScrollIntoView($ImagePreviewList.SelectedItem)}; $script:updatingSelection=$false
+    Preload-Images; $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ContextIdle,[System.Action]{[System.GC]::Collect()})|Out-Null}
+
+function Open-Folder{$fb=New-Object System.Windows.Forms.FolderBrowserDialog; $fb.Description="Select a folder"; $fb.ShowNewFolderButton=$false; if(-not [string]::IsNullOrEmpty($script:config.LastFolder) -and [System.IO.Directory]::Exists($script:config.LastFolder)){$fb.SelectedPath=$script:config.LastFolder}; if($fb.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK){return}; if([string]::IsNullOrEmpty($fb.SelectedPath) -or -not [System.IO.Directory]::Exists($fb.SelectedPath)){return}; Load-Folder $fb.SelectedPath}
+function Load-Folder([string]$fp){$script:config.LastFolder=$fp; Build-FolderTree $fp; Populate-ImagePreviews $fp; if($script:images.Count -gt 0){$script:currentIndex=0; Update-Image}else{$PlaceholderPanel.Visibility='Visible'; $MainImage.Source=$null; $FSImage.Source=$null; $FileInfoLabel.Text=""; $FileCountLabel.Text=""; $FileNameLabel.Text=""; $window.Title="Windows Photo Viewer - $([System.IO.Path]::GetFileName($fp))"}}
+function Open-Images{$fd=New-Object Microsoft.Win32.OpenFileDialog; $fd.Multiselect=$true; $fd.Filter="Images|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tiff;*.tif;*.ico|All|*.*"; $fd.Title="Open Image"; if(-not [string]::IsNullOrEmpty($script:config.LastFolder) -and [System.IO.Directory]::Exists($script:config.LastFolder)){$fd.InitialDirectory=$script:config.LastFolder}; if($fd.ShowDialog() -ne $true){return}; $script:images.Clear(); $script:imageCache.Clear(); if($fd.FileNames.Count -eq 1){$dir=[System.IO.Path]::GetDirectoryName($fd.FileNames[0]); $script:config.LastFolder=$dir; Build-FolderTree $dir; Populate-ImagePreviews $dir; $script:currentIndex=0; for($i=0;$i -lt $script:images.Count;$i++){if($script:images[$i] -eq $fd.FileNames[0]){$script:currentIndex=$i; break}}}else{foreach($f in ($fd.FileNames|Sort-Object)){$script:images.Add($f)}; $script:currentIndex=0; $dir=[System.IO.Path]::GetDirectoryName($fd.FileNames[0]); $script:config.LastFolder=$dir; Build-FolderTree $dir; $script:currentFolder=$dir; $PreviewHeader.Text="IMAGES ($($script:images.Count))"; $ImagePreviewList.Items.Clear(); $ct=0; foreach($f in $script:images){if($ct -ge $script:maxPreviewLoad){break}; $el=New-PreviewElement $f $script:thumbSize; $ImagePreviewList.Items.Add($el)|Out-Null; $ct++}}; Update-Image}
+function Step-Next{if($script:images.Count -eq 0){return}; $script:currentIndex=($script:currentIndex+1)%$script:images.Count; Update-Image}
+function Step-Prev{if($script:images.Count -eq 0){return}; $script:currentIndex=($script:currentIndex-1+$script:images.Count)%$script:images.Count; Update-Image}
+
+$window.Add_Closing({
+    if($window.WindowState -eq [System.Windows.WindowState]::Normal){$script:config.WindowWidth=[int]$window.ActualWidth; $script:config.WindowHeight=[int]$window.ActualHeight; $script:config.WindowLeft=[int]$window.Left; $script:config.WindowTop=[int]$window.Top; $script:config.WindowState="Normal"}
+    elseif($window.WindowState -eq [System.Windows.WindowState]::Maximized){$script:config.WindowState="Maximized"; $rb=$window.RestoreBounds; if($rb.Width -gt 0){$script:config.WindowWidth=[int]$rb.Width; $script:config.WindowHeight=[int]$rb.Height; $script:config.WindowLeft=[int]$rb.Left; $script:config.WindowTop=[int]$rb.Top}}
+    if($script:panelVisible -and $LeftPanelColumn.Width.Value -gt 10){$script:config.LeftPanelWidth=[int]$LeftPanelColumn.Width.Value}
+    $script:config.PreviewListHeight=[int]$PreviewListBorder.Height; $script:config.ThumbSize=$script:thumbSize; $script:config.ZoomMode=$script:zoomMode; $script:config.ViewMode=$script:viewMode; $script:config.LeftPanelVisible=if($script:panelVisible){1}else{0}
+    $script:config.DetailColName=[int]$DetailColNameDef.Width.Value; $script:config.DetailColSize=[int]$DetailColSizeDef.Width.Value; $script:config.DetailColDate=[int]$DetailColDateDef.Width.Value
+    $script:config.SortColumn=$script:sortColumn; $script:config.SortDirection=$script:sortDirection
+    if(-not [string]::IsNullOrEmpty($script:currentFolder)){$script:config.LastFolder=$script:currentFolder}; Write-Ini $script:config})
+
+$HamburgerBtn.Add_Click({$script:panelVisible=-not $script:panelVisible; Apply-PanelVisibility})
+$OpenFolderBtn.Add_Click({Open-Folder})
+$ThumbSmallerBtn.Add_Click({$ci=[Array]::IndexOf($script:thumbSizes,$script:thumbSize); if($ci -lt 0){$ci=2}; if($ci -gt 0){$script:thumbSize=$script:thumbSizes[$ci-1]; $ThumbSizeLabel.Text="$($script:thumbSize)"; Rebuild-Previews}})
+$ThumbLargerBtn.Add_Click({$ci=[Array]::IndexOf($script:thumbSizes,$script:thumbSize); if($ci -lt 0){$ci=2}; if($ci -lt ($script:thumbSizes.Count-1)){$script:thumbSize=$script:thumbSizes[$ci+1]; $ThumbSizeLabel.Text="$($script:thumbSize)"; Rebuild-Previews}})
+$ViewThumbBtn.Add_Click({$script:viewMode="Thumbnails"; Apply-ViewMode; Rebuild-Previews})
+$ViewDetailBtn.Add_Click({$script:viewMode="Details"; Apply-ViewMode; Rebuild-Previews})
+$SortNameBtn.Add_Click({if($script:sortColumn -eq "Name"){$script:sortDirection=if($script:sortDirection -eq "Ascending"){"Descending"}else{"Ascending"}}else{$script:sortColumn="Name"; $script:sortDirection="Ascending"}; Update-SortIndicators; Rebuild-Previews})
+$SortSizeBtn.Add_Click({if($script:sortColumn -eq "Size"){$script:sortDirection=if($script:sortDirection -eq "Ascending"){"Descending"}else{"Ascending"}}else{$script:sortColumn="Size"; $script:sortDirection="Ascending"}; Update-SortIndicators; Rebuild-Previews})
+$SortDateBtn.Add_Click({if($script:sortColumn -eq "Date"){$script:sortDirection=if($script:sortDirection -eq "Ascending"){"Descending"}else{"Ascending"}}else{$script:sortColumn="Date"; $script:sortDirection="Descending"}; Update-SortIndicators; Rebuild-Previews})
+
+$FolderTree.Add_SelectedItemChanged({param($s,$e); $sel=$e.NewValue; if($null -eq $sel){return}; $fp2=$sel.Tag; if([string]::IsNullOrEmpty($fp2) -or -not [System.IO.Directory]::Exists($fp2)){return}; Populate-ImagePreviews $fp2; if($script:images.Count -gt 0){$script:currentIndex=0; Update-Image}else{$PlaceholderPanel.Visibility='Visible'; $MainImage.Source=$null; $FSImage.Source=$null; $FileInfoLabel.Text=""; $FileCountLabel.Text=""; $FileNameLabel.Text=""; $window.Title="Windows Photo Viewer - $([System.IO.Path]::GetFileName($fp2))"}})
+
+$ImagePreviewList.Add_SelectionChanged({param($s,$e); if($script:updatingSelection){return}; $idx=$ImagePreviewList.SelectedIndex; if($idx -lt 0){return}; if($idx -ge 0 -and $idx -lt $ImagePreviewList.Items.Count){$item=$ImagePreviewList.Items[$idx]; if($item -is [System.Windows.Controls.TextBlock] -and $item.Text -match "click to load all"){Load-MorePreviews; return}}; if($idx -ge $script:images.Count){return}; $script:currentIndex=$idx; Update-Image})
+
+$PlaceholderOpenBtn.Add_Click({Open-Images}); $NextBtn.Add_Click({Step-Next}); $PrevBtn.Add_Click({Step-Prev}); $FSNextBtn.Add_Click({Step-Next}); $FSPrevBtn.Add_Click({Step-Prev})
+$MenuOpen.Add_Click({Open-Images}); $MenuFit.Add_Click({if($null -ne $MainImage.Source){$script:zoomMode="BestFit"; Fit-ToWindow}}); $MenuActual.Add_Click({if($null -ne $MainImage.Source){$script:zoomMode="ActualSize"; Apply-Zoom 1.0}})
+$script:zoomLevels=@(0.10,0.25,0.33,0.50,0.67,0.75,1.0,1.25,1.5,2.0,3.0,4.0,6.0,8.0)
+$ZoomInBtn.Add_Click({if($null -eq $MainImage.Source){return}; $c=$script:currentZoom; $n=$script:zoomLevels|Where-Object{$_ -gt ($c+0.005)}|Select-Object -First 1; if($null -eq $n){$n=$script:zoomLevels[-1]}; Apply-Zoom $n})
+$ZoomOutBtn.Add_Click({if($null -eq $MainImage.Source){return}; $c=$script:currentZoom; $p=$script:zoomLevels|Where-Object{$_ -lt ($c-0.005)}|Select-Object -Last 1; if($null -eq $p){$p=$script:zoomLevels[0]}; Apply-Zoom $p})
+$FitBtn.Add_Click({if($null -ne $MainImage.Source){$script:zoomMode="BestFit"; Fit-ToWindow}})
+$DeleteBtn.Add_Click({if($script:images.Count -eq 0){return}; $path=$script:images[$script:currentIndex]; $name=[System.IO.Path]::GetFileName($path); $r=[System.Windows.MessageBox]::Show("Move '$name' to the Recycle Bin?","Windows Photo Viewer",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Question); if($r -eq 'Yes'){try{[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($path,'OnlyErrorDialogs','SendToRecycleBin'); $script:imageCache.Remove($path); $script:images.RemoveAt($script:currentIndex); $script:allFolderFiles=@($script:allFolderFiles|Where-Object{$_ -ne $path}); if($ImagePreviewList.Items.Count -gt $script:currentIndex){$script:updatingSelection=$true; $ImagePreviewList.Items.RemoveAt($script:currentIndex); $script:updatingSelection=$false}; if($script:currentIndex -ge $script:images.Count){$script:currentIndex=0}; $PreviewHeader.Text="IMAGES ($($script:images.Count))"; Update-Image}catch{[System.Windows.MessageBox]::Show("Could not delete.`n$_","Error",'OK','Error')}}})
+
+function Enter-Fullscreen{if($script:images.Count -eq 0){return}; $script:oldResizeMode=$window.ResizeMode; $Overlay.Visibility='Visible'; $Overlay.Focus()|Out-Null; $window.WindowStyle='None'; $window.ResizeMode='NoResize'; $window.WindowState='Maximized'; $script:slideshowRunning=$true; $script:lastMousePos=$null; $script:fsIdleTimer.Stop(); $script:fsIdleTimer.Start(); if($null -eq $script:slideshowTimer){$script:slideshowTimer=New-Object System.Windows.Threading.DispatcherTimer; $script:slideshowTimer.Interval=[TimeSpan]::FromSeconds(5); $script:slideshowTimer.Add_Tick({if($script:slideshowRunning){Step-Next}})}; $script:slideshowTimer.Start()}
+function Exit-Fullscreen{$Overlay.Visibility='Collapsed'; $window.WindowStyle='SingleBorderWindow'; $window.ResizeMode=$script:oldResizeMode; $window.WindowState='Normal'; $window.Cursor=[System.Windows.Input.Cursors]::Arrow; $script:fsIdleTimer.Stop(); $FSBottomBar.Visibility='Visible'; $FSCountLabelBorder.Visibility='Visible'; if($null -ne $script:slideshowTimer){$script:slideshowTimer.Stop()}; $script:slideshowRunning=$false}
+$FSBtn.Add_Click({Enter-Fullscreen}); $FSExitBtn.Add_Click({Exit-Fullscreen})
+$FSPauseBtn.Add_Click({$script:slideshowRunning=-not $script:slideshowRunning; if($script:slideshowRunning){$script:slideshowTimer.Start()}else{$script:slideshowTimer.Stop()}})
+$Viewer.Add_PreviewMouseWheel({param($s,$e); if($null -eq $MainImage.Source){return}; Apply-Zoom($script:currentZoom*($(if($e.Delta -gt 0){1.15}else{1/1.15}))); $e.Handled=$true})
+$Viewer.Add_PreviewMouseLeftButtonDown({param($s,$e); if($null -eq $MainImage.Source){return}; if($e.ClickCount -eq 2){if($Overlay.Visibility -eq 'Visible'){Exit-Fullscreen}else{Enter-Fullscreen}; return}; $script:isDragging=$true; $script:dragStartPos=$e.GetPosition($Viewer); $script:dragStartHOffset=$Viewer.HorizontalOffset; $script:dragStartVOffset=$Viewer.VerticalOffset; $Viewer.Cursor=[System.Windows.Input.Cursors]::ScrollAll; $Viewer.CaptureMouse()|Out-Null; $e.Handled=$true})
+$Viewer.Add_PreviewMouseMove({param($s,$e); if(-not $script:isDragging){return}; $p=$e.GetPosition($Viewer); $Viewer.ScrollToHorizontalOffset($script:dragStartHOffset+($script:dragStartPos.X-$p.X)); $Viewer.ScrollToVerticalOffset($script:dragStartVOffset+($script:dragStartPos.Y-$p.Y))})
+$Viewer.Add_PreviewMouseLeftButtonUp({param($s,$e); if($script:isDragging){$script:isDragging=$false; $Viewer.ReleaseMouseCapture(); $Viewer.Cursor=[System.Windows.Input.Cursors]::Arrow}})
+$window.Add_SizeChanged({if($null -ne $MainImage.Source -and $script:zoomMode -eq "BestFit" -and [Math]::Abs($script:currentZoom-$script:fitZoom) -lt 0.002){$script:fitZoom=Get-FitZoom; Apply-Zoom $script:fitZoom}})
+$window.Add_KeyDown({param($s,$e); if($Overlay.Visibility -eq 'Visible'){$window.Cursor=[System.Windows.Input.Cursors]::Arrow; $FSBottomBar.Visibility='Visible'; $FSCountLabelBorder.Visibility='Visible'; $script:fsIdleTimer.Stop(); $script:fsIdleTimer.Start()}; switch($e.Key){'Escape'{if($Overlay.Visibility -eq 'Visible'){Exit-Fullscreen}} 'Right'{Step-Next; $e.Handled=$true} 'Left'{Step-Prev; $e.Handled=$true} 'F11'{if($Overlay.Visibility -eq 'Visible'){Exit-Fullscreen}else{Enter-Fullscreen}} 'Delete'{$DeleteBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))} 'F'{if($null -ne $MainImage.Source){$script:zoomMode="BestFit"; Fit-ToWindow}} 'Add'{if($null -ne $MainImage.Source){$ZoomInBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))}} 'Subtract'{if($null -ne $MainImage.Source){$ZoomOutBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))}}}; if($e.Key -eq 'O' -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)){Open-Images; $e.Handled=$true}})
+$window.AllowDrop=$true; $window.Add_DragOver({param($s,$e); $e.Effects=[System.Windows.DragDropEffects]::Copy; $e.Handled=$true})
+$window.Add_Drop({param($s,$e); if(-not $e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)){return}; $files=$e.Data.GetData([System.Windows.DataFormats]::FileDrop); if($files.Count -eq 1 -and [System.IO.Directory]::Exists($files[0])){Load-Folder $files[0]; return}; $script:images.Clear(); $script:imageCache.Clear(); foreach($f in $files){if($script:supportedExts -contains [System.IO.Path]::GetExtension($f).ToLower()){$script:images.Add($f)}}; if($script:images.Count -gt 0){$sorted=$script:images|Sort-Object -Unique; $script:images.Clear(); foreach($f in $sorted){$script:images.Add($f)}; $script:currentIndex=0; $dir=[System.IO.Path]::GetDirectoryName($script:images[0]); $script:config.LastFolder=$dir; Build-FolderTree $dir; Populate-ImagePreviews $dir; for($i=0;$i -lt $script:images.Count;$i++){if($script:images[$i] -eq $sorted[0]){$script:currentIndex=$i; break}}; Update-Image}})
+
+$startupHandled=$false; $cmdArgs=[System.Environment]::GetCommandLineArgs()
+if($cmdArgs.Count -gt 1){$argPath=$cmdArgs[-1]; if([System.IO.File]::Exists($argPath)){$dir=[System.IO.Path]::GetDirectoryName($argPath); $script:config.LastFolder=$dir; Build-FolderTree $dir; Populate-ImagePreviews $dir; $script:currentIndex=0; for($i=0;$i -lt $script:images.Count;$i++){if($script:images[$i] -eq $argPath){$script:currentIndex=$i; break}}; Update-Image; $startupHandled=$true}elseif([System.IO.Directory]::Exists($argPath)){Load-Folder $argPath; $startupHandled=$true}}
+if(-not $startupHandled -and -not [string]::IsNullOrEmpty($script:config.LastFolder) -and [System.IO.Directory]::Exists($script:config.LastFolder)){Load-Folder $script:config.LastFolder}
+
+$window.ShowDialog()|Out-Null
